@@ -15,10 +15,10 @@ impl Clock for CloudflareClock {
     }
 }
 
-/// Durable Object state store. Snapshot env/storage before awaiting.
+/// Durable Object state store.
 ///
-/// worker 0.5 `Storage::put` takes `&mut self`. The port is `&self`
-/// (a store, like the memory Mutex). Mutation stays here.
+/// worker 0.8 `Storage::put` takes `&self`. The Mutex is still the right
+/// holder: two stores share one Storage from `state.storage()`.
 pub struct DOStateStore {
     storage: Mutex<worker::durable::Storage>,
 }
@@ -36,12 +36,12 @@ impl StateStore for DOStateStore {
     async fn get(&self) -> Result<Option<KernelState>, String> {
         let storage = self.storage.lock().map_err(|e| e.to_string())?;
         match storage.get::<KernelState>("kernel_state").await {
-            Ok(s) => Ok(Some(s)),
+            Ok(s) => Ok(s),
             Err(_) => Ok(None),
         }
     }
     async fn put(&self, state: &KernelState) -> Result<(), String> {
-        let mut storage = self.storage.lock().map_err(|e| e.to_string())?;
+        let storage = self.storage.lock().map_err(|e| e.to_string())?;
         storage
             .put("kernel_state", state)
             .await
@@ -65,7 +65,7 @@ impl DOEventLedger {
 impl EventLedger for DOEventLedger {
     async fn append(&self, kind: &str, body: &str) -> Result<(), String> {
         let key = format!("ledger:{}:{}", kind, body);
-        let mut storage = self.storage.lock().map_err(|e| e.to_string())?;
+        let storage = self.storage.lock().map_err(|e| e.to_string())?;
         storage.put(&key, "1").await.map_err(|e| e.to_string())
     }
 }

@@ -17,6 +17,8 @@ on `Kernel` in crates/key-kernel/src/lib.rs.
 
 use worker::*;
 
+use std::cell::RefCell;
+
 use curatom_attestation::{hmac_hex, hmac_key_bytes, AttestationClaims};
 use curatom_key_kernel::Kernel;
 use curatom_organic_router::{activity_view, approval_view, intent_view, me_view};
@@ -54,7 +56,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 pub struct CuratomKernel {
 
     state: State,
-    kernel: Option<K>,
+    kernel: RefCell<Option<K>>,
     owner_id: String,
     hmac_key: Vec<u8>,
     orchestrator_url: String,
@@ -64,7 +66,6 @@ pub struct CuratomKernel {
     bucket: Option<Bucket>,
 }
 
-#[durable_object]
 impl DurableObject for CuratomKernel {
     fn new(state: State, env: Env) -> Self {
         console_error_panic_hook::set_once();
@@ -89,7 +90,7 @@ impl DurableObject for CuratomKernel {
 
         Self {
             state,
-            kernel: None,
+            kernel: RefCell::new(None),
             owner_id,
             hmac_key,
             orchestrator_url,
@@ -99,7 +100,7 @@ impl DurableObject for CuratomKernel {
         }
     }
 
-    async fn fetch(&mut self, req: Request) -> Result<Response> {
+    async fn fetch(&self, req: Request) -> Result<Response> {
         self.ensure().await?;
 
         let hr = to_dto(req).await?;
@@ -143,8 +144,8 @@ impl DurableObject for CuratomKernel {
 }
 
 impl CuratomKernel {
-    async fn ensure(&mut self) -> Result<()> {
-        if self.kernel.is_some() {
+    async fn ensure(&self) -> Result<()> {
+        if self.kernel.borrow().is_some() {
             return Ok(());
         }
         if self.owner_id.is_empty() {
@@ -169,7 +170,7 @@ impl CuratomKernel {
             CloudflareClock,
         );
         k.load().await.map_err(Error::RustError)?;
-        self.kernel = Some(k);
+        *self.kernel.borrow_mut() = Some(k);
         Ok(())
     }
 
@@ -197,7 +198,7 @@ impl CuratomKernel {
         (200, me_view(&self.owner_id))
     }
 
-    async fn h_create_intent(&mut self, hr: &HttpRequestDto) -> Reply {
+    async fn h_create_intent(&self, hr: &HttpRequestDto) -> Reply {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
@@ -208,8 +209,8 @@ impl CuratomKernel {
             return (400, json!({ "error": "missing_text" }));
         };
         let owner = self.owner_id.clone();
-        let k = self.kernel.as_mut().unwrap();
-        match k.create_intent(text, &owner).await {
+        let mut k = self.kernel.borrow_mut();
+        match k.as_mut().unwrap().create_intent(text, &owner).await {
             Ok(intent) => (201, intent_view(&intent)),
             Err(e) => (500, json!({ "error": e })),
         }
@@ -219,7 +220,7 @@ impl CuratomKernel {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
-        match self.kernel.as_ref().unwrap().get_intent(intent_id) {
+        match self.kernel.borrow().as_ref().unwrap().get_intent(intent_id) {
             Ok(Some(i)) => (200, intent_view(&i)),
             Ok(None) => (404, json!({ "error": "unknown_intent" })),
             Err(e) => (500, json!({ "error": e })),
@@ -230,7 +231,7 @@ impl CuratomKernel {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
-        match self.kernel.as_ref().unwrap().list_pending_approvals() {
+        match self.kernel.borrow().as_ref().unwrap().list_pending_approvals() {
             Ok(list) => {
                 let out: Vec<Value> = list
                     .iter()
@@ -246,7 +247,7 @@ impl CuratomKernel {
     ///
     /// The consume happens before the POST on purpose. Elixir receives proof
     /// that a capability was spent, never a capability it could spend itself.
-    async fn h_approve(&mut self, hr: &HttpRequestDto, approval_id: &str) -> Reply {
+    async fn h_approve(&self, hr: &HttpRequestDto, approval_id: &str) -> Reply {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
@@ -270,7 +271,8 @@ impl CuratomKernel {
         let orchestrator_url = self.orchestrator_url.clone();
         let approval_id = approval_id.to_string();
 
-        let k = self.kernel.as_mut().unwrap();
+        let mut k = self.kernel.borrow_mut();
+        let k = k.as_mut().unwrap();
 
         match k.decide_approval(&approval_id, ApprovalDecision::Approve).await {
             Ok(Some(_)) => {}
@@ -345,12 +347,12 @@ impl CuratomKernel {
         }
     }
 
-    async fn h_refuse(&mut self, hr: &HttpRequestDto, approval_id: &str) -> Reply {
+    async fn h_refuse(&self, hr: &HttpRequestDto, approval_id: &str) -> Reply {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
-        let k = self.kernel.as_mut().unwrap();
-        match k.decide_approval(approval_id, ApprovalDecision::Refuse).await {
+        let mut k = self.kernel.borrow_mut();
+        match k.as_mut().unwrap().decide_approval(approval_id, ApprovalDecision::Refuse).await {
             Ok(Some(_)) => (200, json!({ "ok": true })),
             Ok(None) => (409, json!({ "error": "approval_not_pending" })),
             Err(e) => (500, json!({ "error": e })),
@@ -361,7 +363,7 @@ impl CuratomKernel {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
-        match self.kernel.as_ref().unwrap().activity() {
+        match self.kernel.borrow().as_ref().unwrap().activity() {
             Ok(items) => {
                 let out: Vec<Value> = items
                     .iter()
@@ -380,7 +382,7 @@ impl CuratomKernel {
     // say who the machine is. The kernel call below runs only if that ever
     // changes.
 
-    async fn h_inorganic_submit(&mut self, hr: &HttpRequestDto) -> Reply {
+    async fn h_inorganic_submit(&self, hr: &HttpRequestDto) -> Reply {
         let identity = match self.inorganic_idp.authenticate(hr).await {
             Ok(Some(id)) => id,
             Ok(None) => return (401, json!({ "error": "unauthenticated" })),
@@ -405,8 +407,8 @@ impl CuratomKernel {
                 None => CuratomDuration::SingleUse,
             },
         };
-        let k = self.kernel.as_mut().unwrap();
-        match k.submit_inorganic(req).await {
+        let mut k = self.kernel.borrow_mut();
+        match k.as_mut().unwrap().submit_inorganic(req).await {
             Ok(a) => (202, curatom_inorganic_router::submitted_view(&a)),
             Err(e) => (400, json!({ "error": e })),
         }
@@ -418,7 +420,7 @@ impl CuratomKernel {
             Err(e) => return (503, json!({ "error": e })),
             Ok(Some(_)) => {}
         }
-        match self.kernel.as_ref().unwrap().get_approval(approval_id) {
+        match self.kernel.borrow().as_ref().unwrap().get_approval(approval_id) {
             Ok(Some(a)) => (200, curatom_inorganic_router::status_view(&a)),
             Ok(None) => (404, json!({ "error": "unknown_request" })),
             Err(e) => (500, json!({ "error": e })),
@@ -427,7 +429,7 @@ impl CuratomKernel {
 
     // ---- internal (Contract 3 callback) ----
 
-    async fn h_internal_outcome(&mut self, hr: &HttpRequestDto) -> Reply {
+    async fn h_internal_outcome(&self, hr: &HttpRequestDto) -> Reply {
         let Some(provided) = hr.header("x-curatom-hmac") else {
             return (401, json!({ "error": "missing_hmac" }));
         };
@@ -454,8 +456,8 @@ impl CuratomKernel {
             at: CloudflareClock.now_iso(),
         };
 
-        let k = self.kernel.as_mut().unwrap();
-        match k.record_outcome(outcome).await {
+        let mut k = self.kernel.borrow_mut();
+        match k.as_mut().unwrap().record_outcome(outcome).await {
             Ok(()) => (200, json!({ "ok": true })),
             Err(e) => (500, json!({ "error": e })),
         }
@@ -465,7 +467,7 @@ impl CuratomKernel {
 /// Contract 2's one POST. `RequestInit`'s builders return `&mut Self`, and
 /// `worker::Request` has no `send` -- outbound goes through `Fetch`.
 async fn post_signed(url: &str, raw: &str, key: &[u8]) -> Result<u16> {
-    let mut headers = Headers::new();
+    let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     headers.set("x-curatom-hmac", &hmac_hex(raw.as_bytes(), key))?;
 
