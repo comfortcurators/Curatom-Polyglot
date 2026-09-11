@@ -6,19 +6,29 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+# SDK Sandbox is the container. SandboxDO stays exported because v1
+# already created that sqlite class; it is not the runtime path.
 [[containers]]
-class_name = "SandboxDO"
+class_name = "Sandbox"
 image = "./Dockerfile"
 max_instances = 10
 instance_type = "basic"
 
 [[durable_objects.bindings]]
 name = "Sandbox"
+class_name = "Sandbox"
+
+[[durable_objects.bindings]]
+name = "SandboxDO"
 class_name = "SandboxDO"
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SandboxDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Sandbox"]
 
 [[r2_buckets]]
 binding = "CURATOM_ARTIFACTS"

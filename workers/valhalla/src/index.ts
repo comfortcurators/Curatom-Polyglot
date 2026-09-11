@@ -1,10 +1,11 @@
-import { Sandbox } from "@cloudflare/sandbox";
+import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 import { SandboxDO } from "./sandbox-do";
 
 export { Sandbox, SandboxDO };
 
 interface Env {
-  Sandbox: DurableObjectNamespace;
+  Sandbox: DurableObjectNamespace<Sandbox>;
+  SandboxDO: DurableObjectNamespace;
   CURATOM_ARTIFACTS: R2Bucket;
   CURATOM_LEDGER: D1Database;
   CURATOM_KERNEL: Fetcher;
@@ -37,13 +38,8 @@ export default {
       if (scope.length === 0) return jsonErr(400, "missing_scope");
 
       const sandboxId = `vh-${knock_id ?? crypto.randomUUID().slice(0, 8)}`;
-      const id = env.Sandbox.idFromName(sandboxId);
-      const stub = env.Sandbox.get(id);
-
-      await stub.fetch("https://sandbox/init", {
-        method: "POST",
-        body: JSON.stringify({ label, knock_id }),
-      });
+      // SDK: get-or-create. Container starts on first exec, not here.
+      getSandbox(env.Sandbox, sandboxId);
 
       const freezeIds: string[] = [];
       for (const resource of scope) {
@@ -88,13 +84,17 @@ export default {
       const command = params.get("cmd");
       if (!command) return jsonErr(400, "missing_cmd");
 
-      const id = env.Sandbox.idFromName(sandboxId);
-      const stub = env.Sandbox.get(id);
-      const resp = await stub.fetch("https://sandbox/exec", {
-        method: "POST",
-        body: JSON.stringify({ command }),
-      });
-      return new Response(resp.body, { status: resp.status, headers: corsHeaders() });
+      try {
+        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const result = await sandbox.exec(command);
+        const stdout = (result as { stdout?: string }).stdout ?? "";
+        const stderr = (result as { stderr?: string }).stderr ?? "";
+        const exitCode = (result as { exitCode?: number }).exitCode ?? 0;
+        await appendLog(env, sandboxId, "exec", command, stdout.slice(0, 2000));
+        return jsonOk({ stdout, stderr, exit_code: exitCode });
+      } catch (e) {
+        return jsonErr(500, `exec_failed: ${String(e)}`);
+      }
     }
 
     if (path.match(/^\/valhalla\/[^/]+\/write$/) && request.method === "GET") {
@@ -103,13 +103,14 @@ export default {
       const content = params.get("body") ?? "";
       if (!filePath) return jsonErr(400, "missing_path");
 
-      const id = env.Sandbox.idFromName(sandboxId);
-      const stub = env.Sandbox.get(id);
-      await stub.fetch("https://sandbox/write", {
-        method: "POST",
-        body: JSON.stringify({ path: filePath, content }),
-      });
-      return jsonOk({ written: filePath, bytes: content.length });
+      try {
+        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        await sandbox.writeFile(filePath, content);
+        await appendLog(env, sandboxId, "write", filePath, `${content.length} bytes`);
+        return jsonOk({ written: filePath, bytes: content.length });
+      } catch (e) {
+        return jsonErr(500, `write_failed: ${String(e)}`);
+      }
     }
 
     if (path.match(/^\/valhalla\/[^/]+\/read$/) && request.method === "GET") {
@@ -117,14 +118,15 @@ export default {
       const filePath = params.get("path");
       if (!filePath) return jsonErr(400, "missing_path");
 
-      const id = env.Sandbox.idFromName(sandboxId);
-      const stub = env.Sandbox.get(id);
-      const resp = await stub.fetch("https://sandbox/read", {
-        method: "POST",
-        body: JSON.stringify({ path: filePath }),
-      });
-      const text = await resp.text();
-      return jsonOk({ path: filePath, body: text });
+      try {
+        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const raw = await sandbox.readFile(filePath);
+        const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+        await appendLog(env, sandboxId, "read", filePath, `${text.length} bytes`);
+        return jsonOk({ path: filePath, body: text });
+      } catch (e) {
+        return jsonErr(500, `read_failed: ${String(e)}`);
+      }
     }
 
     if (path.match(/^\/valhalla\/[^/]+\/parity$/) && request.method === "GET") {
@@ -187,12 +189,7 @@ export default {
         return jsonErr(500, "release_failed");
       }
       const releaseJson = (await releaseResp.json()) as { released: number };
-
-      const id = env.Sandbox.idFromName(sandboxId);
-      const stub = env.Sandbox.get(id);
-
-      const logResp = await stub.fetch("https://sandbox/log");
-      const logJson = await logResp.json() as { entries: unknown[] };
+      const entries = await sessionLog(env, sandboxId);
 
       const receipt = {
         sandbox_id: sandboxId,
@@ -200,7 +197,7 @@ export default {
         report,
         parity_note: parityNote,
         freezes_released: releaseJson.released,
-        log: logJson.entries,
+        log: entries,
       };
 
       const receiptRef = `valhalla/${sandboxId}/receipt.json`;
@@ -210,7 +207,12 @@ export default {
         `UPDATE sessions SET closed_at = ?1, receipt_ref = ?2 WHERE session_id = ?3`
       ).bind(new Date().toISOString(), receiptRef, sandboxId).run();
 
-      await stub.fetch("https://sandbox/destroy", { method: "POST" });
+      try {
+        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        await sandbox.destroy();
+      } catch {
+        // already gone
+      }
 
       return jsonOk({
         closed: true,
@@ -221,10 +223,17 @@ export default {
 
     if (path.match(/^\/valhalla\/[^/]+\/status$/) && request.method === "GET") {
       const sandboxId = path.split("/")[2];
-      const id = env.Sandbox.idFromName(sandboxId);
-      const stub = env.Sandbox.get(id);
-      const resp = await stub.fetch("https://sandbox/status");
-      return new Response(resp.body, { status: resp.status, headers: corsHeaders() });
+      const row = await env.CURATOM_LEDGER.prepare(
+        `SELECT session_id, key_label, opened_at, closed_at FROM sessions WHERE session_id = ?1`
+      ).bind(sandboxId).first<{ session_id: string; key_label: string; opened_at: string; closed_at: string | null }>();
+      const entries = await sessionLog(env, sandboxId);
+      return jsonOk({
+        sandbox_id: sandboxId,
+        label: row?.key_label ?? "",
+        opened_at: row?.opened_at ?? null,
+        entry_count: entries.length,
+        alive: row ? row.closed_at == null : false,
+      });
     }
 
     return jsonErr(404, "not_found");
@@ -278,4 +287,31 @@ async function internalHmac(env: Env, body: string): Promise<string> {
   );
   const sig = await crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(body));
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function appendLog(
+  env: Env,
+  sandboxId: string,
+  kind: string,
+  detail: string,
+  result?: string,
+): Promise<void> {
+  await env.CURATOM_LEDGER.prepare(
+    `INSERT INTO drift_log (at, kind, subject, detail, severity)
+     VALUES (?1, ?2, ?3, ?4, 'info')`
+  ).bind(
+    new Date().toISOString(),
+    `valhalla_${kind}`,
+    sandboxId,
+    JSON.stringify({ detail, result }),
+  ).run();
+}
+
+async function sessionLog(env: Env, sandboxId: string): Promise<unknown[]> {
+  const res = await env.CURATOM_LEDGER.prepare(
+    `SELECT at, kind, detail FROM drift_log
+     WHERE subject = ?1 AND kind LIKE 'valhalla_%'
+     ORDER BY at ASC`
+  ).bind(sandboxId).all();
+  return res.results ?? [];
 }
