@@ -19,6 +19,7 @@ apps/mobile/dist
 !.env.example
 .dev.vars
 workers/api/build/
+.wrangler/
 
 
 
