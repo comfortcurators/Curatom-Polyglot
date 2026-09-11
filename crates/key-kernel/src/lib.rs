@@ -250,6 +250,7 @@ where
             resources: approval.resources.clone(),
             permissions: approval.permissions.clone(),
             request_digest: approval.digest.clone(),
+            intent_id: approval.intent_id.clone(),
             expires_at,
             expires_unix,
         };
@@ -379,6 +380,8 @@ mod tests {
         pollster::block_on(k.decide_approval(&appr.id, ApprovalDecision::Approve)).unwrap();
         let issued = pollster::block_on(k.issue_grant(&appr.id)).unwrap().unwrap();
         let secret = issued.handle.secret;
+        assert_eq!(secret.intent_id, intent.id);
+        assert_ne!(secret.intent_id, secret.request_digest);
         let g = pollster::block_on(k.consume_capability(
             &secret.token,
             &secret.requester_id,

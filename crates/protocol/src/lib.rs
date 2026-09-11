@@ -51,6 +51,8 @@ pub struct CapabilitySecret {
     pub resources: Vec<String>,
     pub permissions: Vec<Permission>,
     pub request_digest: String,
+    /// Set at issue_grant from the approval's intent. Not a digest.
+    pub intent_id: String,
     /// For humans / logs. None on single-use.
     pub expires_at: Option<String>,
     /// For the kernel. 0 = single-use. Compare integers. Do not parse dates.

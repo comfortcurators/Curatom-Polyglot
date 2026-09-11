@@ -13,6 +13,10 @@ members = [
     "crates/inorganic-router",
     "crates/substrate-memory",
 ]
+exclude = [
+    "workers/api",
+    "crates/substrate-cloudflare",
+]
 # workers/api and crates/substrate-cloudflare are wasm/workers-rs only.
 # They are not workspace members so `cargo test --workspace` stays native.
 # Build the worker with wrangler / cargo check --target wasm32-unknown-unknown

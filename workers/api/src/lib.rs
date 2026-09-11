@@ -285,7 +285,7 @@ impl CuratomKernel {
         let job = json!({
             "job_id": claims_list[0].job_id,
             "approval_id": approval_id,
-            "intent_id": secret.request_digest,
+            "intent_id": secret.intent_id,
             "requester_id": secret.requester_id,
             "actions": claims_list.iter().map(|c| {
                 json!({
