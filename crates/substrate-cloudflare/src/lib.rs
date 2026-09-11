@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use curatom_ports::{ArtifactStore, Clock, EventLedger, StateStore};
 use curatom_protocol::{HttpRequestDto, Identity, IdentityKind, KernelState};
+use std::sync::Mutex;
 
 pub struct CloudflareClock;
 impl Clock for CloudflareClock {
@@ -15,26 +16,33 @@ impl Clock for CloudflareClock {
 }
 
 /// Durable Object state store. Snapshot env/storage before awaiting.
+///
+/// worker 0.5 `Storage::put` takes `&mut self`. The port is `&self`
+/// (a store, like the memory Mutex). Mutation stays here.
 pub struct DOStateStore {
-    storage: worker::durable::Storage,
+    storage: Mutex<worker::durable::Storage>,
 }
 
 impl DOStateStore {
     pub fn new(storage: worker::durable::Storage) -> Self {
-        Self { storage }
+        Self {
+            storage: Mutex::new(storage),
+        }
     }
 }
 
 #[async_trait(?Send)]
 impl StateStore for DOStateStore {
     async fn get(&self) -> Result<Option<KernelState>, String> {
-        match self.storage.get::<KernelState>("kernel_state").await {
+        let storage = self.storage.lock().map_err(|e| e.to_string())?;
+        match storage.get::<KernelState>("kernel_state").await {
             Ok(s) => Ok(Some(s)),
             Err(_) => Ok(None),
         }
     }
     async fn put(&self, state: &KernelState) -> Result<(), String> {
-        self.storage
+        let mut storage = self.storage.lock().map_err(|e| e.to_string())?;
+        storage
             .put("kernel_state", state)
             .await
             .map_err(|e| e.to_string())
@@ -42,12 +50,14 @@ impl StateStore for DOStateStore {
 }
 
 pub struct DOEventLedger {
-    storage: worker::durable::Storage,
+    storage: Mutex<worker::durable::Storage>,
 }
 
 impl DOEventLedger {
     pub fn new(storage: worker::durable::Storage) -> Self {
-        Self { storage }
+        Self {
+            storage: Mutex::new(storage),
+        }
     }
 }
 
@@ -55,10 +65,8 @@ impl DOEventLedger {
 impl EventLedger for DOEventLedger {
     async fn append(&self, kind: &str, body: &str) -> Result<(), String> {
         let key = format!("ledger:{}:{}", kind, body);
-        self.storage
-            .put(&key, "1")
-            .await
-            .map_err(|e| e.to_string())
+        let mut storage = self.storage.lock().map_err(|e| e.to_string())?;
+        storage.put(&key, "1").await.map_err(|e| e.to_string())
     }
 }
 
@@ -165,3 +173,4 @@ pub async fn to_dto(mut req: worker::Request) -> Result<HttpRequestDto, worker::
         body,
     })
 }
+
