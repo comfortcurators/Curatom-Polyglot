@@ -7,6 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 class_name = "SandboxDO"
 image = "./Dockerfile"
 max_instances = 10
+instance_type = "basic"
 
 [[durable_objects.bindings]]
 name = "Sandbox"
