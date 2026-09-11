@@ -396,34 +396,49 @@ where
             .collect())
     }
 
-    pub fn get_token(&self) -> Option<OrganicToken> {
-        self.st().ok()?.tokens.values().next().cloned()
-    }
-
     pub fn token_matches(&self, token: &str) -> bool {
         self.st()
             .map(|s| s.tokens.contains_key(token))
             .unwrap_or(false)
     }
 
-    pub async fn ensure_token(&mut self) -> Result<OrganicToken, String> {
-        if let Some(t) = self.get_token() {
-            return Ok(t);
+    pub fn get_key(&self, token: &str) -> Option<OrganicToken> {
+        self.st().ok()?.tokens.get(token).cloned()
+    }
+
+    pub fn list_keys(&self) -> Vec<OrganicToken> {
+        let mut v: Vec<OrganicToken> = self
+            .st()
+            .map(|s| s.tokens.values().cloned().collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        v
+    }
+
+    pub async fn create_key(&mut self, label: String) -> Result<OrganicToken, String> {
+        let label = label.trim().to_string();
+        if label.is_empty() {
+            return Err("label_required".into());
+        }
+        if label.len() > 80 {
+            return Err("label_too_long".into());
         }
         let raw = random_id("tok").to_uppercase().replace('_', "-");
         let token = format!("RAJVANSH-{raw}");
         let t = OrganicToken {
             token: token.clone(),
             owner_id: self.owner_id.clone(),
+            label: label.clone(),
             created_at: self.clock.now_iso(),
+            last_used_at: None,
         };
         {
             let st = self.st_mut()?;
             st.tokens.insert(t.token.clone(), t.clone());
         }
         self.note(
-            "token.created",
-            format!("token {}", &token[..token.len().min(24)]),
+            "key.created",
+            format!("{label} {}", &token[..token.len().min(24)]),
             None,
             None,
         );
@@ -431,14 +446,62 @@ where
         Ok(t)
     }
 
-    pub async fn rotate_token(&mut self) -> Result<OrganicToken, String> {
+    pub async fn revoke_key(&mut self, token: &str) -> Result<(), String> {
         {
             let st = self.st_mut()?;
-            st.tokens.clear();
+            if st.tokens.remove(token).is_none() {
+                return Err("unknown_token".into());
+            }
         }
-        self.note("token.rotated", "token rerolled", None, None);
-        self.persist().await?;
-        self.ensure_token().await
+        self.note(
+            "key.revoked",
+            token[..token.len().min(24)].to_string(),
+            None,
+            None,
+        );
+        self.persist().await
+    }
+
+    pub fn key_log(&self, token: &str) -> Vec<KeyLogEntry> {
+        let Ok(st) = self.st() else {
+            return Vec::new();
+        };
+        let mut out: Vec<KeyLogEntry> = Vec::new();
+        for k in st.knocks.values().filter(|k| k.token == token) {
+            out.push(KeyLogEntry {
+                kind: "knock.created".into(),
+                at: k.created_at.clone(),
+                knock_id: Some(k.id.clone()),
+                name: Some(k.name.clone()),
+                reason: Some(k.reason.clone()),
+            });
+            match k.status {
+                KnockStatus::Approved => out.push(KeyLogEntry {
+                    kind: "knock.approved".into(),
+                    at: k.decided_at.clone().unwrap_or_default(),
+                    knock_id: Some(k.id.clone()),
+                    name: Some(k.name.clone()),
+                    reason: None,
+                }),
+                KnockStatus::Refused => out.push(KeyLogEntry {
+                    kind: "knock.refused".into(),
+                    at: k.decided_at.clone().unwrap_or_default(),
+                    knock_id: Some(k.id.clone()),
+                    name: Some(k.name.clone()),
+                    reason: None,
+                }),
+                KnockStatus::Expired => out.push(KeyLogEntry {
+                    kind: "knock.expired".into(),
+                    at: k.decided_at.clone().unwrap_or_default(),
+                    knock_id: Some(k.id.clone()),
+                    name: Some(k.name.clone()),
+                    reason: None,
+                }),
+                KnockStatus::Pending => {}
+            }
+        }
+        out.sort_by(|a, b| b.at.cmp(&a.at));
+        out
     }
 
     pub async fn create_knock(
@@ -504,9 +567,14 @@ where
         };
         let kid = k.id.clone();
         let kname = k.name.clone();
+        let tok = k.token.clone();
+        let used_at = k.created_at.clone();
         {
             let st = self.st_mut()?;
             st.knocks.insert(kid.clone(), k.clone());
+            if let Some(t) = st.tokens.get_mut(&tok) {
+                t.last_used_at = Some(used_at);
+            }
         }
         self.note("knock.created", kname, Some(kid), None);
         self.persist().await?;
@@ -771,10 +839,11 @@ mod tests {
     #[test]
     fn token_rotate_kills_old() {
         let mut k = k(1_700_000_000);
-        let t1 = pollster::block_on(k.ensure_token()).unwrap();
+        let t1 = pollster::block_on(k.create_key("one".into())).unwrap();
         assert!(t1.token.starts_with("RAJVANSH-"));
         assert!(k.token_matches(&t1.token));
-        let t2 = pollster::block_on(k.rotate_token()).unwrap();
+        pollster::block_on(k.revoke_key(&t1.token)).unwrap();
+        let t2 = pollster::block_on(k.create_key("two".into())).unwrap();
         assert_ne!(t1.token, t2.token);
         assert!(!k.token_matches(&t1.token));
         assert!(k.token_matches(&t2.token));
@@ -783,7 +852,7 @@ mod tests {
     #[test]
     fn knock_expires_after_ttl() {
         let mut k = k(1_700_000_000);
-        let t = pollster::block_on(k.ensure_token()).unwrap();
+        let t = pollster::block_on(k.create_key("t".into())).unwrap();
         let kn = pollster::block_on(k.create_knock(
             t.token.clone(),
             "Claude".into(),

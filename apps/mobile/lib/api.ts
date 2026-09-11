@@ -5,6 +5,20 @@ function devHeaders(): Record<string, string> {
   return id ? { "x-curatom-dev-organic": id } : {};
 }
 
+async function parseBody(text: string): Promise<Record<string, unknown> | unknown> {
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object") return parsed;
+    return { __value: parsed };
+  } catch {
+    return {
+      __error: "non_json_response",
+      __raw: text.slice(0, 300),
+    };
+  }
+}
+
 async function jpost(path: string, body: unknown) {
   const r = await fetch(`${BASE}${path}`, {
     method: "POST",
@@ -12,15 +26,13 @@ async function jpost(path: string, body: unknown) {
     body: JSON.stringify(body),
   });
   const text = await r.text();
-  const parsed = text ? JSON.parse(text) : {};
-  return { status: r.status, body: parsed };
+  return { status: r.status, body: await parseBody(text) };
 }
 
 async function jget(path: string) {
   const r = await fetch(`${BASE}${path}`, { headers: devHeaders() });
   const text = await r.text();
-  const parsed = text ? JSON.parse(text) : {};
-  return { status: r.status, body: parsed };
+  return { status: r.status, body: await parseBody(text) };
 }
 
 export type Me = {
@@ -93,4 +105,44 @@ export async function activity() {
   const { status, body } = await jget("/organic/activity");
   if (status !== 200) throw new Error(`activity: ${status}`);
   return body as { seq: number; at: string; kind: string; actor: string }[];
+}
+
+export type KeyInfo = {
+  token: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+  activity_count: number;
+};
+
+export type KeyLogEntry = {
+  kind: string;
+  at: string;
+  knock_id: string | null;
+  name: string | null;
+  reason: string | null;
+};
+
+export async function listKeys(): Promise<KeyInfo[]> {
+  const { status, body } = await jget("/organic/keys");
+  if (status !== 200) throw new Error(`keys: ${status} ${JSON.stringify(body)}`);
+  return body as KeyInfo[];
+}
+
+export async function createKey(label: string) {
+  const { status, body } = await jpost("/organic/keys", { label });
+  if (status !== 201) throw new Error(`createKey: ${status} ${JSON.stringify(body)}`);
+  return body as { token: string; label: string; created_at: string; file_text: string };
+}
+
+export async function revokeKey(token: string) {
+  const { status, body } = await jpost(`/organic/keys/${encodeURIComponent(token)}/revoke`, {});
+  if (status !== 200) throw new Error(`revokeKey: ${status} ${JSON.stringify(body)}`);
+  return body;
+}
+
+export async function keyLog(token: string): Promise<KeyLogEntry[]> {
+  const { status, body } = await jget(`/organic/keys/${encodeURIComponent(token)}/log`);
+  if (status !== 200) throw new Error(`keyLog: ${status} ${JSON.stringify(body)}`);
+  return body as KeyLogEntry[];
 }

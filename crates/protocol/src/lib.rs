@@ -2,7 +2,7 @@
 
 pub mod access;
 pub use access::{
-    Knock, KnockStatus, OrganicMeView, OrganicToken, OwnerRecord, KNOCK_TTL_SECS,
+    KeyLogEntry, Knock, KnockStatus, OrganicMeView, OrganicToken, OwnerRecord, KNOCK_TTL_SECS,
 };
 
 use serde::{Deserialize, Serialize};

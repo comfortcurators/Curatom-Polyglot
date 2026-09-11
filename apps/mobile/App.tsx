@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   SafeAreaView, ScrollView, View, Text, Pressable, StyleSheet,
-  RefreshControl, ActivityIndicator, Modal,
+  RefreshControl, ActivityIndicator, Modal, TextInput,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import * as Clipboard from "expo-clipboard";
@@ -9,7 +9,7 @@ import * as api from "./lib/api";
 import EnrollmentScreen from "./screens/EnrollmentScreen";
 import TurnstileGate from "./components/TurnstileGate";
 
-type Tab = "token" | "knocks" | "activity";
+type Tab = "keys" | "knocks" | "activity";
 
 export default function App() {
   const [me, setMe] = useState<api.Me | null>(null);
@@ -51,72 +51,169 @@ function Dashboard() {
     <SafeAreaView style={s.root}>
       <StatusBar style="light" />
       <View style={s.tabBar}>
-        {(["token", "knocks", "activity"] as Tab[]).map((t) => (
+        {(["keys", "knocks", "activity"] as Tab[]).map((t) => (
           <Pressable key={t} onPress={() => setTab(t)} style={[s.tab, tab === t && s.tabActive]}>
             <Text style={[s.tabText, tab === t && s.tabTextActive]}>{t.toUpperCase()}</Text>
           </Pressable>
         ))}
       </View>
-      {tab === "token" && <TokenTab />}
+      {tab === "keys" && <KeysTab />}
       {tab === "knocks" && <KnocksTab />}
       {tab === "activity" && <ActivityTab />}
     </SafeAreaView>
   );
 }
 
-function TokenTab() {
-  const [info, setInfo] = useState<api.TokenInfo | null>(null);
+function KeysTab() {
+  const [keys, setKeys] = useState<api.KeyInfo[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [detail, setDetail] = useState<api.KeyInfo | null>(null);
+  const [lastFile, setLastFile] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    try { setInfo(await api.getToken()); setError(null); }
+    try { setKeys(await api.listKeys()); setError(null); }
     catch (e) { setError(String(e)); }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  async function copy() {
-    if (!info) return;
-    await Clipboard.setStringAsync(info.file_text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
-
-  async function rotate() {
-    setBusy(true); setError(null);
-    try { await api.rotateToken(); await refresh(); }
+  async function revoke(token: string) {
+    setBusy(true);
+    try { await api.revokeKey(token); await refresh(); }
     catch (e) { setError(String(e)); }
     setBusy(false);
   }
 
-  if (!info) return <View style={s.center}><ActivityIndicator color="#fff" /></View>;
+  return (
+    <ScrollView contentContainerStyle={s.pad}
+      refreshControl={<RefreshControl refreshing={false} onRefresh={refresh} />}>
+      <Pressable onPress={() => setCreating(true)} style={s.btn}>
+        <Text style={s.btnText}>+ NEW KEY</Text>
+      </Pressable>
+      {error ? <Text style={s.err}>{error}</Text> : null}
+      {keys.length === 0 && <Text style={s.dim}>No keys yet. Create one to hand to an AI.</Text>}
+
+      {keys.map((k) => (
+        <View key={k.token} style={s.card}>
+          <View style={s.rowTop}>
+            <Text style={s.cardTitle}>{k.label}</Text>
+            <Text style={s.dim}>{k.activity_count} activities</Text>
+          </View>
+          <Text style={s.mono}>{k.token.slice(0, 24)}…</Text>
+          <Text style={s.dim}>created {k.created_at}</Text>
+          {k.last_used_at ? <Text style={s.dim}>last used {k.last_used_at}</Text> : null}
+          <View style={s.row}>
+            <Pressable onPress={() => setDetail(k)} style={[s.btn, s.btnGhost]} disabled={busy}>
+              <Text style={s.btnGhostText}>LOG</Text>
+            </Pressable>
+            <Pressable onPress={() => revoke(k.token)} style={[s.btn, s.btnGhost]} disabled={busy}>
+              <Text style={s.btnGhostText}>REVOKE</Text>
+            </Pressable>
+          </View>
+        </View>
+      ))}
+
+      <CreateKeyModal
+        visible={creating}
+        onClose={() => setCreating(false)}
+        onCreated={(file_text) => { setLastFile(file_text); setCreating(false); refresh(); }}
+      />
+
+      <Modal visible={lastFile !== null} transparent animationType="fade"
+        onRequestClose={() => setLastFile(null)}>
+        <View style={s.modalBackdrop}>
+          <ScrollView contentContainerStyle={s.modalCard}>
+            <Text style={s.modalH}>Give this to an AI</Text>
+            <View style={s.codeBox}>
+              <Text style={s.code}>{lastFile}</Text>
+            </View>
+            <Pressable
+              onPress={async () => {
+                if (lastFile) { await Clipboard.setStringAsync(lastFile); }
+                setLastFile(null);
+              }}
+              style={s.btn}>
+              <Text style={s.btnText}>COPY & CLOSE</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </Modal>
+
+      <KeyLogModal info={detail} onClose={() => setDetail(null)} />
+    </ScrollView>
+  );
+}
+
+function CreateKeyModal({ visible, onClose, onCreated }: {
+  visible: boolean; onClose: () => void; onCreated: (file_text: string) => void;
+}) {
+  const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.createKey(label.trim());
+      setLabel("");
+      onCreated(r.file_text);
+    } catch (e) { setError(String(e)); }
+    setBusy(false);
+  }
 
   return (
-    <ScrollView contentContainerStyle={s.pad}>
-      <Text style={s.h1}>Your token</Text>
-      <Text style={s.dim}>
-        Copy this. Give it to any AI. They will read it and come to Curatom.
-        You will see their knock here.
-      </Text>
-
-      <View style={s.codeBox}>
-        <Text style={s.code}>{info.file_text}</Text>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={s.modalBackdrop}>
+        <View style={s.modalCard}>
+          <Text style={s.modalH}>New key</Text>
+          <Text style={s.modalDim}>Name it however you like. This label is yours. The AI never sees it.</Text>
+          <TextInput value={label} onChangeText={setLabel}
+            placeholder="e.g. Claude laptop, work key"
+            placeholderTextColor="#666" style={s.input} />
+          {error ? <Text style={s.err}>{error}</Text> : null}
+          <View style={s.row}>
+            <Pressable onPress={onClose} style={[s.btn, s.btnGhost]} disabled={busy}>
+              <Text style={s.btnGhostText}>CANCEL</Text>
+            </Pressable>
+            <Pressable onPress={submit} style={[s.btn, busy && s.btnDim]} disabled={busy || !label.trim()}>
+              {busy ? <ActivityIndicator color="#000" /> : <Text style={s.btnText}>CREATE</Text>}
+            </Pressable>
+          </View>
+        </View>
       </View>
+    </Modal>
+  );
+}
 
-      <View style={s.row}>
-        <Pressable onPress={copy} style={s.btn}>
-          <Text style={s.btnText}>{copied ? "COPIED" : "COPY"}</Text>
-        </Pressable>
-        <Pressable onPress={rotate} style={[s.btn, s.btnGhost]} disabled={busy}>
-          {busy ? <ActivityIndicator color="#ccc" /> :
-            <Text style={s.btnGhostText}>REROLL</Text>}
-        </Pressable>
+function KeyLogModal({ info, onClose }: { info: api.KeyInfo | null; onClose: () => void }) {
+  const [log, setLog] = useState<api.KeyLogEntry[]>([]);
+  useEffect(() => {
+    if (!info) { setLog([]); return; }
+    api.keyLog(info.token).then(setLog).catch(() => setLog([]));
+  }, [info]);
+  return (
+    <Modal visible={info !== null} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={s.modalBackdrop}>
+        <ScrollView contentContainerStyle={s.modalCard}>
+          <Text style={s.modalH}>{info?.label}</Text>
+          <Text style={s.modalDim}>{log.length} entries</Text>
+          {log.map((e, i) => (
+            <View key={i} style={s.logRow}>
+              <Text style={s.logKind}>{e.kind}</Text>
+              <Text style={s.dim}>{e.at}</Text>
+              {e.name ? <Text style={s.dim}>by {e.name}</Text> : null}
+              {e.reason ? <Text style={s.dim}>{e.reason}</Text> : null}
+            </View>
+          ))}
+          {log.length === 0 && <Text style={s.dim}>No activity yet.</Text>}
+          <Pressable onPress={onClose} style={s.btn}>
+            <Text style={s.btnText}>CLOSE</Text>
+          </Pressable>
+        </ScrollView>
       </View>
-
-      {error ? <Text style={s.err}>{error}</Text> : null}
-    </ScrollView>
+    </Modal>
   );
 }
 
@@ -132,7 +229,6 @@ function KnocksTab() {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
-
   useEffect(() => {
     const iv = setInterval(refresh, 2000);
     return () => clearInterval(iv);
@@ -159,7 +255,6 @@ function KnocksTab() {
       refreshControl={<RefreshControl refreshing={false} onRefresh={refresh} />}>
       {last ? <Text style={s.result}>{last}</Text> : null}
       {knocks.length === 0 && <Text style={s.dim}>Nothing at the door.</Text>}
-
       {knocks.map((k) => (
         <View key={k.id} style={[s.card, k.seconds_remaining < 20 && s.cardUrgent]}>
           <View style={s.rowTop}>
@@ -168,7 +263,6 @@ function KnocksTab() {
               {Math.max(0, Math.floor(k.seconds_remaining))}s
             </Text>
           </View>
-          <Text style={s.dim}>came with your token</Text>
           {k.permissions.map((p, i) => (
             <Text key={i} style={s.perm}>· {p} {k.resources[i] ?? ""}</Text>
           ))}
@@ -199,11 +293,9 @@ function KnocksTab() {
                 <Text style={s.modalDim}>Do you recognize this name?</Text>
               </>
             ) : null}
-
             {tsToken === null
               ? <TurnstileGate onToken={setTsToken} />
               : <Text style={s.modalOk}>Human verified.</Text>}
-
             <View style={s.row}>
               <Pressable onPress={() => { setConfirming(null); setTsToken(null); }}
                 style={[s.btn, s.btnGhost]}>
@@ -245,7 +337,8 @@ const s = StyleSheet.create({
   h1: { color: "#fff", fontSize: 24, fontWeight: "700" },
   dim: { color: "#999" },
   perm: { color: "#ccc" },
-  codeBox: { backgroundColor: "#101012", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#222" },
+  mono: { color: "#bbb", fontFamily: "monospace", fontSize: 13 },
+  codeBox: { backgroundColor: "#101012", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#222", marginVertical: 12 },
   code: { color: "#bbb", fontFamily: "monospace", fontSize: 12, lineHeight: 18 },
   btn: { backgroundColor: "#eee", padding: 12, borderRadius: 10, alignItems: "center", flex: 1 },
   btnDim: { opacity: 0.5 },
@@ -255,7 +348,7 @@ const s = StyleSheet.create({
   card: { borderWidth: 1, borderColor: "#2a2a2a", borderRadius: 12, padding: 14, gap: 6 },
   cardUrgent: { borderColor: "#a44" },
   cardTitle: { color: "#fff", fontWeight: "700", fontSize: 16 },
-  err: { color: "#f66", fontSize: 16, fontWeight: "700" },
+  err: { color: "#f66", fontSize: 14, fontWeight: "700" },
   row: { flexDirection: "row", gap: 8, marginTop: 8 },
   rowTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   result: { color: "#8f8", marginTop: 8 },
@@ -272,4 +365,7 @@ const s = StyleSheet.create({
   modalH: { color: "#fff", fontSize: 18, fontWeight: "700" },
   modalDim: { color: "#888", fontSize: 13, lineHeight: 20 },
   modalOk: { color: "#8f8", fontSize: 14, padding: 12 },
+  input: { color: "#fff", borderWidth: 1, borderColor: "#333", borderRadius: 10, padding: 12, marginTop: 8 },
+  logRow: { borderTopWidth: 1, borderTopColor: "#222", paddingVertical: 8, gap: 2 },
+  logKind: { color: "#fff", fontWeight: "600" },
 });
