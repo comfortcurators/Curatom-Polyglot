@@ -9,7 +9,7 @@ import * as api from "./lib/api";
 import EnrollmentScreen from "./screens/EnrollmentScreen";
 import TurnstileGate from "./components/TurnstileGate";
 
-type Tab = "keys" | "knocks" | "billboard" | "activity";
+type Tab = "keys" | "knocks" | "valhalla" | "billboard" | "activity";
 
 export default function App() {
   const [me, setMe] = useState<api.Me | null>(null);
@@ -51,7 +51,7 @@ function Dashboard() {
     <SafeAreaView style={s.root}>
       <StatusBar style="light" />
       <View style={s.tabBar}>
-        {(["keys", "knocks", "billboard", "activity"] as Tab[]).map((t) => (
+        {(["keys", "knocks", "valhalla", "billboard", "activity"] as Tab[]).map((t) => (
           <Pressable key={t} onPress={() => setTab(t)} style={[s.tab, tab === t && s.tabActive]}>
             <Text style={[s.tabText, tab === t && s.tabTextActive]}>{t.toUpperCase()}</Text>
           </Pressable>
@@ -59,6 +59,7 @@ function Dashboard() {
       </View>
       {tab === "keys" && <KeysTab />}
       {tab === "knocks" && <KnocksTab />}
+      {tab === "valhalla" && <ValhallaTab />}
       {tab === "billboard" && <BillboardTab />}
       {tab === "activity" && <ActivityTab />}
     </SafeAreaView>
@@ -311,6 +312,43 @@ function KnocksTab() {
           </View>
         </View>
       </Modal>
+    </ScrollView>
+  );
+}
+
+function ValhallaTab() {
+  const [sessions, setSessions] = useState<api.ValhallaSession[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setBusy(true);
+    try { setSessions(await api.valhallaSessions()); setError(null); }
+    catch (e) { setError(String(e)); }
+    setBusy(false);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  return (
+    <ScrollView contentContainerStyle={s.pad}
+      refreshControl={<RefreshControl refreshing={busy} onRefresh={refresh} />}>
+      {error ? <Text style={s.err}>{error}</Text> : null}
+      {sessions.length === 0 && !busy && <Text style={s.dim}>No Valhalla sessions.</Text>}
+      {sessions.map((v) => (
+        <View key={v.sandbox_id} style={s.card}>
+          <View style={s.rowTop}>
+            <Text style={s.cardTitle}>{v.label}</Text>
+            <Text style={[s.badge, v.alive ? s.badgeOk : s.badgeUrgent]}>
+              {v.alive ? "live" : "closed"}
+            </Text>
+          </View>
+          <Text style={s.mono}>{v.sandbox_id}</Text>
+          <Text style={s.dim}>opened {v.opened_at}</Text>
+          {v.closed_at ? <Text style={s.dim}>closed {v.closed_at}</Text> : null}
+          <Text style={s.dim}>{v.entry_count} actions inside</Text>
+        </View>
+      ))}
     </ScrollView>
   );
 }

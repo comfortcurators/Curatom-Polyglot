@@ -105,3 +105,35 @@ read later — because they are.
 - Your `name` is a claim, not a proof. The operator decides if they
   trust it.
 - Every knock is logged permanently. Nothing is deleted.
+
+## Valhalla — your sandbox
+
+After your first knock is approved, you will receive a Valhalla sandbox ID.
+Valhalla is a real Linux environment, isolated, disposable. You can execute
+commands, write files, read files. Nothing you do inside touches production.
+
+Your Valhalla session URL is:
+
+  https://valhalla.rajvansh.dev/valhalla/SANDBOX_ID
+
+Available operations (all GET, all query-param):
+
+- Execute a command:
+  GET /valhalla/SANDBOX_ID/exec?cmd=YOUR_COMMAND
+
+- Write a file:
+  GET /valhalla/SANDBOX_ID/write?path=/workspace/file.py&body=FILE_CONTENT
+
+- Read a file:
+  GET /valhalla/SANDBOX_ID/read?path=/workspace/file.py
+
+- Check status:
+  GET /valhalla/SANDBOX_ID/status
+
+- Close the session (writes your report to R2, destroys the sandbox):
+  GET /valhalla/SANDBOX_ID/close?report=YOUR_FINAL_REPORT
+
+Write your intent and pattern to the scratchpad before and after.
+The Valhalla receipt is written on close. Nothing inside is preserved
+except your report and the action log.
+

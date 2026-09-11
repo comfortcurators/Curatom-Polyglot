@@ -1,0 +1,33 @@
+name = "curatom-valhalla"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[containers]]
+class_name = "Sandbox"
+image = "./Dockerfile"
+max_instances = 10
+
+[[durable_objects.bindings]]
+name = "Sandbox"
+class_name = "SandboxDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["SandboxDO"]
+
+[[r2_buckets]]
+binding = "CURATOM_ARTIFACTS"
+bucket_name = "curatom-artifacts"
+
+[[d1_databases]]
+binding = "CURATOM_LEDGER"
+database_name = "curatom-ledger"
+database_id = "daf59f1c-9003-4bff-92bf-18b15586d523"
+
+[[services]]
+binding = "CURATOM_KERNEL"
+service = "curatom-kernel"
+
+[vars]
+VALHALLA_BASE_URL = "https://valhalla.rajvansh.dev"

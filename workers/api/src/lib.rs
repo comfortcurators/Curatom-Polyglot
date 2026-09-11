@@ -157,6 +157,8 @@ impl DurableObject for CuratomKernel {
                     .to_string();
                 self.h_key_log(&hr, &tok).await
             }
+            ("GET", "/organic/keys/verify") => self.h_verify_key(&hr).await,
+            ("GET", "/organic/valhalla/sessions") => self.h_valhalla_sessions(&hr).await,
             ("GET", "/organic/knocks") => self.h_list_knocks(&hr).await,
             ("POST", p) if p.starts_with("/organic/knocks/") && p.ends_with("/approve") => {
                 let id = p
@@ -463,6 +465,64 @@ impl CuratomKernel {
         (200, json!(k.key_log(token)))
     }
 
+    async fn h_verify_key(&self, hr: &HttpRequestDto) -> Reply {
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(token) = params.get("token").cloned().filter(|t| !t.is_empty()) else {
+            return (400, json!({ "error": "missing_token" }));
+        };
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        if k.token_matches(&token) {
+            (200, json!({ "ok": true }))
+        } else {
+            (401, json!({ "error": "token_not_recognized" }))
+        }
+    }
+
+    async fn h_valhalla_sessions(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let db = match self.env.d1("CURATOM_LEDGER") {
+            Ok(d) => d,
+            Err(e) => return (500, json!({ "error": format!("d1: {e}") })),
+        };
+        let stmt = db.prepare(
+            "SELECT session_id as sandbox_id, key_label as label, \
+             opened_at, closed_at, round_count, intent_count, pattern_count \
+             FROM sessions WHERE session_id LIKE 'vh-%' ORDER BY opened_at DESC LIMIT 100",
+        );
+        match stmt.all().await {
+            Ok(r) => {
+                let rows: Vec<Value> = r.results::<Value>().unwrap_or_default();
+                let sessions: Vec<Value> = rows
+                    .into_iter()
+                    .map(|row| {
+                        json!({
+                            "sandbox_id": row.get("sandbox_id"),
+                            "label": row.get("label"),
+                            "opened_at": row.get("opened_at"),
+                            "closed_at": row.get("closed_at"),
+                            "entry_count": row.get("round_count").cloned().unwrap_or(json!(0)),
+                            "alive": row.get("closed_at").map(|v| v.is_null()).unwrap_or(true),
+                        })
+                    })
+                    .collect();
+                (200, json!({ "sessions": sessions }))
+            }
+            Err(e) => (500, json!({ "error": format!("query: {e}") })),
+        }
+    }
+
     async fn h_list_knocks(&self, hr: &HttpRequestDto) -> Reply {
         if let Err(r) = self.owner(hr).await {
             return r;
@@ -537,6 +597,44 @@ impl CuratomKernel {
             Ok(None) => return (404, json!({ "error": "unknown_knock" })),
             Err(e) => return (500, json!({ "error": e })),
         };
+
+        let wants_valhalla = knock.resources.iter().any(|r| r.starts_with("valhalla."));
+        let mut valhalla_sandbox_id: Option<String> = None;
+        if wants_valhalla {
+            let valhalla_url = self
+                .env
+                .var("VALHALLA_URL")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| "https://valhalla.rajvansh.dev".into());
+            let provision_url = format!(
+                "{}/valhalla/provision?token={}&knock_id={}&label={}",
+                valhalla_url,
+                urlencoding::encode(&knock.token),
+                urlencoding::encode(&knock.id),
+                urlencoding::encode(&knock.name),
+            );
+            let mut init = RequestInit::new();
+            init.with_method(Method::Get);
+            match Request::new_with_init(&provision_url, &init) {
+                Ok(req) => match Fetch::Request(req).send().await {
+                    Ok(mut resp) if resp.status_code() < 400 => {
+                        let body_text = resp.text().await.unwrap_or_default();
+                        if let Ok(parsed) = serde_json::from_str::<Value>(&body_text) {
+                            valhalla_sandbox_id = parsed
+                                .get("sandbox_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                        }
+                    }
+                    _ => {}
+                },
+                Err(_) => {}
+            }
+            if valhalla_sandbox_id.is_none() {
+                return (502, json!({ "error": "valhalla_provision_failed" }));
+            }
+        }
+
         let issued = match k.issue_knock_grant(&knock).await {
             Ok(Some(i)) => i,
             Ok(None) => return (500, json!({ "error": "grant issuance failed" })),
@@ -588,6 +686,7 @@ impl CuratomKernel {
             "knock_id": knock_id,
             "intent_id": secret.intent_id,
             "requester_id": secret.requester_id,
+            "valhalla_sandbox_id": valhalla_sandbox_id,
             "actions": actions,
         });
         let raw = match serde_json::to_string(&envelope) {

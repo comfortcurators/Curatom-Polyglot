@@ -180,3 +180,18 @@ export async function billboardBlob(ref: string): Promise<string> {
   if (status !== 200) throw new Error(`blob: ${status} ${JSON.stringify(body)}`);
   return (body as { body: string }).body ?? "";
 }
+
+export type ValhallaSession = {
+  sandbox_id: string;
+  label: string;
+  opened_at: string;
+  closed_at: string | null;
+  entry_count: number;
+  alive: boolean;
+};
+
+export async function valhallaSessions(): Promise<ValhallaSession[]> {
+  const { status, body } = await jget("/organic/valhalla/sessions");
+  if (status !== 200) throw new Error(`valhalla: ${status} ${JSON.stringify(body)}`);
+  return (body as { sessions: ValhallaSession[] }).sessions ?? [];
+}
