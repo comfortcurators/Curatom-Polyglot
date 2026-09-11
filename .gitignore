@@ -7,7 +7,7 @@ target/
 .vscode
 .DS_Store
 orchestrator/_build
-orchestrator/deps
+# orchestrator/deps is vendored for the offline Container image.
 orchestrator/.elixir_ls
 orchestrator/erl_crash.dump
 apps/mobile/node_modules
