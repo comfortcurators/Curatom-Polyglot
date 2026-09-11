@@ -2,6 +2,9 @@ name = "curatom-orchestrator"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
+# Service-binding only. A workers.dev URL would be a public POST /v1/jobs.
+workers_dev = false
+
 [[containers]]
 class_name = "OrchestratorContainer"
 image = "../../orchestrator/Dockerfile"
