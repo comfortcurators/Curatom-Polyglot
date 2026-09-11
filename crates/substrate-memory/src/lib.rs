@@ -38,6 +38,11 @@ impl MemoryLedger {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Everything appended, for tests that assert on what the ledger holds.
+    pub fn entries(&self) -> Vec<(String, String)> {
+        self.inner.lock().unwrap().clone()
+    }
 }
 
 #[async_trait(?Send)]

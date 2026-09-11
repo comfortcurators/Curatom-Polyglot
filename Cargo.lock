@@ -104,6 +104,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "curatom-crypto",
+ "curatom-organic-router",
  "curatom-ports",
  "curatom-protocol",
  "curatom-resource-registry",

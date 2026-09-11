@@ -144,6 +144,10 @@ pub struct KernelState {
     pub grants: HashMap<String, CapabilitySecret>,
     /// Spent (grant_id, resource, permission-as-str) triples.
     pub consumed: HashSet<String>,
+    /// Approval ids that have already minted a grant. One approval, one grant.
+    /// `serde(default)` so state written before this field still loads.
+    #[serde(default)]
+    pub issued: HashSet<String>,
     pub outcomes: Vec<Outcome>,
     pub activity: Vec<Activity>,
 }

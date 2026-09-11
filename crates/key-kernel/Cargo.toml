@@ -16,4 +16,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 curatom-substrate-memory = { path = "../substrate-memory" }
+curatom-organic-router = { path = "../organic-router" }
 pollster = "0.4"

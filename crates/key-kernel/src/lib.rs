@@ -214,6 +214,16 @@ where
             if a.status != ApprovalStatus::Pending {
                 return Ok(None);
             }
+            // The approval is a decision about a specific request. Re-derive the
+            // digest from what the card now says and refuse if it has moved --
+            // otherwise approving an inventory read could hand out a grant for
+            // something the owner never saw.
+            if decision == ApprovalDecision::Approve {
+                let expected = request_digest(&a.requester, &a.resources, &a.reason);
+                if expected != a.digest {
+                    return Err("digest_mismatch".into());
+                }
+            }
             a.status = status;
         }
         let a = self.get_approval(approval_id)?.unwrap();
@@ -235,6 +245,10 @@ where
             Some(a) if a.status == ApprovalStatus::Approved => a,
             _ => return Ok(None),
         };
+        // One approval, one grant. A second call is not a second permission.
+        if self.st()?.issued.contains(approval_id) {
+            return Ok(None);
+        }
         let now = self.clock.now_unix();
         let (expires_unix, expires_at) = match &approval.duration {
             Duration::SingleUse => (0, None),
@@ -257,6 +271,7 @@ where
         {
             let st = self.st_mut()?;
             st.grants.insert(secret.grant_id.clone(), secret.clone());
+            st.issued.insert(approval_id.to_string());
         }
         self.note(
             "grant.issued",
