@@ -82,6 +82,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "curatom-enrollment"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "curatom-crypto",
+ "curatom-ports",
+ "curatom-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "curatom-execution"
 version = "0.1.0"
 dependencies = [
