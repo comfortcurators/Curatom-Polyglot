@@ -1,4 +1,5 @@
 import { Container } from "@cloudflare/containers";
+import { env } from "cloudflare:workers";
 
 export class OrchestratorContainer extends Container {
   defaultPort = 4000;
@@ -8,6 +9,7 @@ export class OrchestratorContainer extends Container {
   envVars = {
     PORT: "4000",
     CURATOM_WORKER_URL: "http://curatom.kernel",
+    CURATOM_HMAC_KEY: env.CURATOM_HMAC_KEY,
   };
 
   outboundByHost = {
@@ -30,16 +32,19 @@ export default {
       const container = env.ORCHESTRATOR.get(
         env.ORCHESTRATOR.idFromName("main"),
       );
-      await container.startAndWaitForPorts({
-        startOptions: {
-          envVars: {
-            CURATOM_HMAC_KEY: env.CURATOM_HMAC_KEY,
-            CURATOM_WORKER_URL: "http://curatom.kernel",
-            PORT: "4000",
-          },
-        },
-      });
-      return container.fetch(request);
+      console.log("ORCH_BEFORE_CONTAINER_FETCH", Date.now());
+      let resp;
+      try {
+        resp = await container.fetch(request);
+        console.log("ORCH_AFTER_CONTAINER_FETCH", Date.now(), resp.status);
+      } catch (e) {
+        console.log("ORCH_CONTAINER_FETCH_THREW", String(e), e?.stack);
+        return new Response(
+          JSON.stringify({ error: "container_fetch_failed", detail: String(e) }),
+          { status: 502, headers: { "content-type": "application/json" } },
+        );
+      }
+      return resp;
     }
     return new Response("not found", { status: 404 });
   },
