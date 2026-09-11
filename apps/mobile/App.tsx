@@ -47,9 +47,26 @@ export default function App() {
 
 function Dashboard() {
   const [tab, setTab] = useState<Tab>("knocks");
+  const [frozen, setFrozen] = useState<api.Frozen[]>([]);
+  useEffect(() => {
+    const refresh = () => api.frozenList().then(setFrozen).catch(() => {});
+    refresh();
+    const iv = setInterval(refresh, 5000);
+    return () => clearInterval(iv);
+  }, []);
   return (
     <SafeAreaView style={s.root}>
       <StatusBar style="light" />
+      {frozen.length > 0 && (
+        <View style={s.frozenBanner}>
+          <Text style={s.frozenText}>
+            {frozen.length} resource{frozen.length === 1 ? "" : "s"} frozen by Valhalla
+          </Text>
+          <Text style={s.frozenSub}>
+            {frozen.map((f) => f.scope).join(", ")}
+          </Text>
+        </View>
+      )}
       <View style={s.tabBar}>
         {(["keys", "knocks", "valhalla", "billboard", "activity"] as Tab[]).map((t) => (
           <Pressable key={t} onPress={() => setTab(t)} style={[s.tab, tab === t && s.tabActive]}>
@@ -489,4 +506,7 @@ const s = StyleSheet.create({
   chipOn: { backgroundColor: "#eee", borderColor: "#eee" },
   chipText: { color: "#666", fontSize: 12, fontWeight: "600" },
   chipTextOn: { color: "#000" },
+  frozenBanner: { backgroundColor: "#a44", padding: 12 },
+  frozenText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  frozenSub: { color: "#fee", fontSize: 11, marginTop: 2 },
 });

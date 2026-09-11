@@ -66,3 +66,15 @@ pub struct Knock {
 }
 
 pub const KNOCK_TTL_SECS: i64 = 88;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Freeze {
+    pub id: String,
+    pub scope: String,
+    pub reason: String,
+    pub session_id: Option<String>,
+    pub created_at: String,
+    pub released_at: Option<String>,
+    pub release_reason: Option<String>,
+    pub release_parity_ok: Option<bool>,
+}

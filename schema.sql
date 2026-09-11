@@ -31,3 +31,27 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_key_hash ON sessions(key_hash);
 CREATE INDEX IF NOT EXISTS idx_sessions_opened_at ON sessions(opened_at);
+
+CREATE TABLE IF NOT EXISTS freezes (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  session_id TEXT,
+  created_at TEXT NOT NULL,
+  released_at TEXT,
+  release_reason TEXT,
+  release_parity_ok INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_freezes_scope ON freezes(scope);
+CREATE INDEX IF NOT EXISTS idx_freezes_session ON freezes(session_id);
+CREATE INDEX IF NOT EXISTS idx_freezes_active ON freezes(released_at);
+
+CREATE TABLE IF NOT EXISTS drift_log (
+  at TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  subject TEXT,
+  detail TEXT,
+  severity TEXT
+);
+

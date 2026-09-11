@@ -195,3 +195,17 @@ export async function valhallaSessions(): Promise<ValhallaSession[]> {
   if (status !== 200) throw new Error(`valhalla: ${status} ${JSON.stringify(body)}`);
   return (body as { sessions: ValhallaSession[] }).sessions ?? [];
 }
+
+export type Frozen = {
+  id: string;
+  scope: string;
+  reason: string;
+  session_id: string | null;
+  created_at: string;
+};
+
+export async function frozenList(): Promise<Frozen[]> {
+  const { status, body } = await jget("/organic/frozen");
+  if (status !== 200) throw new Error(`frozen: ${status} ${JSON.stringify(body)}`);
+  return (body as { frozen: Frozen[] }).frozen ?? [];
+}

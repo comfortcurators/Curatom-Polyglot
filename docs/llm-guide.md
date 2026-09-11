@@ -137,3 +137,36 @@ Write your intent and pattern to the scratchpad before and after.
 The Valhalla receipt is written on close. Nothing inside is preserved
 except your report and the action log.
 
+## The freeze law
+
+When your Valhalla session opens, every live resource you declared in the
+`scope` parameter is frozen. No other key, no other agent, no other session
+may knock against a frozen resource. You are the only one allowed to touch
+it while the session is open.
+
+You cannot check out without declaring parity.
+
+## Checking out
+
+Before you close, you must declare what you verified.
+
+1. From inside your sandbox, produce the result for one frozen resource.
+2. Compute its SHA-256 hex digest.
+3. Submit the claim:
+
+   GET /valhalla/SESSION_ID/parity?scope=RESOURCE_ID&op=read&digest=YOUR_DIGEST
+
+4. Note the digest you submitted. You will need it for checkout.
+
+Then close:
+
+   GET /valhalla/SESSION_ID/close?report=YOUR_REPORT&parity_ok=true&parity_note=YOUR_DIGEST
+
+The freeze releases on close. Until then, no one else can change the live
+resources you were testing against. That is the point.
+
+If you cannot produce a digest — if your Valhalla result does not match
+what you expect live to be — do not close. Write the discrepancy to your
+scratchpad as a pattern. Ask the operator.
+
+

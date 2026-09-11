@@ -529,6 +529,14 @@ where
         if resources.is_empty() || permissions.is_empty() {
             return Err("empty_scope".into());
         }
+        for r in &resources {
+            if let Some(f) = self.is_frozen(r, None) {
+                return Err(format!(
+                    "resource_frozen:{}:freeze_id={}:reason={}",
+                    r, f.id, f.reason
+                ));
+            }
+        }
         let mut resources = resources;
         resources.sort();
         resources.dedup();
@@ -670,6 +678,90 @@ where
         self.note(ev, &k.name, Some(k.id.clone()), None);
         self.persist().await?;
         Ok(k)
+    }
+
+    pub fn is_frozen(&self, scope: &str, caller_session: Option<&str>) -> Option<Freeze> {
+        let Ok(st) = self.st() else {
+            return None;
+        };
+        for f in st.freezes.values() {
+            if f.released_at.is_some() {
+                continue;
+            }
+            if f.scope != scope {
+                continue;
+            }
+            if let (Some(owner), Some(caller)) = (f.session_id.as_deref(), caller_session) {
+                if owner == caller {
+                    continue;
+                }
+            }
+            return Some(f.clone());
+        }
+        None
+    }
+
+    pub fn list_frozen(&self) -> Vec<Freeze> {
+        self.st()
+            .map(|s| {
+                s.freezes
+                    .values()
+                    .filter(|f| f.released_at.is_none())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub async fn freeze(
+        &mut self,
+        scope: String,
+        reason: String,
+        session_id: Option<String>,
+    ) -> Result<Freeze, String> {
+        let f = Freeze {
+            id: random_id("frz"),
+            scope: scope.clone(),
+            reason: reason.clone(),
+            session_id: session_id.clone(),
+            created_at: self.clock.now_iso(),
+            released_at: None,
+            release_reason: None,
+            release_parity_ok: None,
+        };
+        {
+            let st = self.st_mut()?;
+            st.freezes.insert(f.id.clone(), f.clone());
+        }
+        self.note("freeze.created", format!("{scope} {reason}"), None, None);
+        self.persist().await?;
+        Ok(f)
+    }
+
+    pub async fn release_freeze(
+        &mut self,
+        freeze_id: &str,
+        parity_ok: bool,
+        reason: String,
+    ) -> Result<Freeze, String> {
+        let now = self.clock.now_iso();
+        let result = {
+            let st = self.st_mut()?;
+            let f = st
+                .freezes
+                .get_mut(freeze_id)
+                .ok_or_else(|| "unknown_freeze".to_string())?;
+            if f.released_at.is_some() {
+                return Err("already_released".into());
+            }
+            f.released_at = Some(now);
+            f.release_reason = Some(reason.clone());
+            f.release_parity_ok = Some(parity_ok);
+            f.clone()
+        };
+        self.note("freeze.released", freeze_id.to_string(), None, None);
+        self.persist().await?;
+        Ok(result)
     }
 
     pub async fn issue_knock_grant(&mut self, knock: &Knock) -> Result<Option<IssuedGrant>, String> {
@@ -883,5 +975,40 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(err, "token_not_recognized");
+    }
+
+    #[test]
+    fn freeze_blocks_new_knock() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("t".into())).unwrap();
+        pollster::block_on(k.freeze(
+            "hostos.inventory".into(),
+            "valhalla_session".into(),
+            Some("vh-1".into()),
+        ))
+        .unwrap();
+        let err = pollster::block_on(k.create_knock(
+            t.token.clone(),
+            "Intruder".into(),
+            "r".into(),
+            vec!["hostos.inventory".into()],
+            vec![Permission::Read],
+            Duration::SingleUse,
+        ))
+        .unwrap_err();
+        assert!(err.starts_with("resource_frozen:hostos.inventory:"));
+        assert_eq!(k.list_frozen().len(), 1);
+        let fid = k.list_frozen()[0].id.clone();
+        pollster::block_on(k.release_freeze(&fid, true, "done".into())).unwrap();
+        assert!(k.list_frozen().is_empty());
+        pollster::block_on(k.create_knock(
+            t.token,
+            "After".into(),
+            "r".into(),
+            vec!["hostos.inventory".into()],
+            vec![Permission::Read],
+            Duration::SingleUse,
+        ))
+        .unwrap();
     }
 }

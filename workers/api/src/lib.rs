@@ -182,6 +182,10 @@ impl DurableObject for CuratomKernel {
             ("POST", "/inorganic/handoff") => self.h_inorganic_handoff(&hr).await,
             ("POST", "/inorganic/submit") => self.h_inorganic_submit(&hr).await,
             ("POST", "/internal/outcome") => self.h_internal_outcome(&hr).await,
+            ("POST", "/internal/freeze") => self.h_internal_freeze(&hr).await,
+            ("POST", "/internal/release") => self.h_internal_release(&hr).await,
+            ("POST", "/internal/release-session") => self.h_internal_release_session(&hr).await,
+            ("GET", "/organic/frozen") => self.h_frozen_list(&hr).await,
             _ => (404, json!({ "error": "not_found" })),
         };
 
@@ -600,6 +604,7 @@ impl CuratomKernel {
 
         let wants_valhalla = knock.resources.iter().any(|r| r.starts_with("valhalla."));
         let mut valhalla_sandbox_id: Option<String> = None;
+        let mut valhalla_frozen: Vec<String> = Vec::new();
         if wants_valhalla {
             let valhalla_url = self
                 .env
@@ -607,11 +612,12 @@ impl CuratomKernel {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|_| "https://valhalla.rajvansh.dev".into());
             let provision_url = format!(
-                "{}/valhalla/provision?token={}&knock_id={}&label={}",
+                "{}/valhalla/provision?token={}&knock_id={}&label={}&scope={}",
                 valhalla_url,
                 urlencoding::encode(&knock.token),
                 urlencoding::encode(&knock.id),
                 urlencoding::encode(&knock.name),
+                urlencoding::encode(&knock.resources.join(",")),
             );
             let mut init = RequestInit::new();
             init.with_method(Method::Get);
@@ -624,6 +630,12 @@ impl CuratomKernel {
                                 .get("sandbox_id")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
+                            if let Some(arr) = parsed.get("frozen").and_then(|v| v.as_array()) {
+                                valhalla_frozen = arr
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect();
+                            }
                         }
                     }
                     _ => {}
@@ -699,6 +711,8 @@ impl CuratomKernel {
                 json!({
                     "ok": true,
                     "job_handed_off": true,
+                    "valhalla_sandbox_id": valhalla_sandbox_id,
+                    "frozen": valhalla_frozen,
                     "orchestrator_response": body,
                 }),
             ),
@@ -1200,6 +1214,165 @@ impl CuratomKernel {
             Ok(()) => (200, json!({ "ok": true })),
             Err(e) => (500, json!({ "error": e })),
         }
+    }
+
+    fn hmac_ok(&self, hr: &HttpRequestDto) -> bool {
+        let Some(provided) = hr.header("x-curatom-hmac") else {
+            return false;
+        };
+        let signed = if hr.body.is_empty() {
+            Url::parse(&hr.url)
+                .ok()
+                .and_then(|u| u.query().map(str::to_string))
+                .unwrap_or_default()
+        } else {
+            hr.body.clone()
+        };
+        let expected = hmac_hex(signed.as_bytes(), &self.hmac_key);
+        curatom_attestation::constant_time_eq(provided.as_bytes(), expected.as_bytes())
+    }
+
+    async fn h_internal_freeze(&self, hr: &HttpRequestDto) -> Reply {
+        if !self.hmac_ok(hr) {
+            return (
+                401,
+                json!({ "error": if hr.header("x-curatom-hmac").is_none() { "missing hmac" } else { "bad hmac" } }),
+            );
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(scope) = params.get("scope").cloned() else {
+            return (400, json!({ "error": "missing_scope" }));
+        };
+        let reason = params
+            .get("reason")
+            .cloned()
+            .unwrap_or_else(|| "unspecified".into());
+        let session_id = params.get("session_id").cloned();
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.freeze(scope, reason, session_id).await {
+            Ok(f) => (
+                200,
+                json!({
+                    "freeze_id": f.id,
+                    "scope": f.scope,
+                    "created_at": f.created_at,
+                }),
+            ),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_internal_release(&self, hr: &HttpRequestDto) -> Reply {
+        if !self.hmac_ok(hr) {
+            return (
+                401,
+                json!({ "error": if hr.header("x-curatom-hmac").is_none() { "missing hmac" } else { "bad hmac" } }),
+            );
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(freeze_id) = params.get("freeze_id").cloned() else {
+            return (400, json!({ "error": "missing_freeze_id" }));
+        };
+        let parity_ok = params.get("parity_ok").map(|v| v == "true").unwrap_or(false);
+        let reason = params.get("reason").cloned().unwrap_or_default();
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.release_freeze(&freeze_id, parity_ok, reason).await {
+            Ok(f) => (200, json!({ "freeze_id": f.id, "released_at": f.released_at })),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_internal_release_session(&self, hr: &HttpRequestDto) -> Reply {
+        if !self.hmac_ok(hr) {
+            return (
+                401,
+                json!({ "error": if hr.header("x-curatom-hmac").is_none() { "missing hmac" } else { "bad hmac" } }),
+            );
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(session_id) = params.get("session_id").cloned() else {
+            return (400, json!({ "error": "missing_session_id" }));
+        };
+        let parity_ok = params.get("parity_ok").map(|v| v == "true").unwrap_or(false);
+        let reason = params.get("reason").cloned().unwrap_or_default();
+        let to_release = {
+            let k = self.kernel.borrow();
+            let Some(k) = k.as_ref() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            k.list_frozen()
+                .iter()
+                .filter(|f| f.session_id.as_deref() == Some(session_id.as_str()))
+                .map(|f| f.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut released = 0;
+        {
+            let mut k = self.kernel.borrow_mut();
+            let Some(k) = k.as_mut() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            for fid in &to_release {
+                if k.release_freeze(fid, parity_ok, reason.clone())
+                    .await
+                    .is_ok()
+                {
+                    released += 1;
+                }
+            }
+        }
+        (200, json!({ "released": released }))
+    }
+
+    async fn h_frozen_list(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        let list: Vec<Value> = k
+            .list_frozen()
+            .iter()
+            .map(|f| {
+                json!({
+                    "id": f.id,
+                    "scope": f.scope,
+                    "reason": f.reason,
+                    "session_id": f.session_id,
+                    "created_at": f.created_at,
+                })
+            })
+            .collect();
+        (200, json!({ "frozen": list }))
     }
 }
 

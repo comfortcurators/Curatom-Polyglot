@@ -9,6 +9,7 @@ interface Env {
   CURATOM_LEDGER: D1Database;
   CURATOM_KERNEL: Fetcher;
   VALHALLA_BASE_URL: string;
+  CURATOM_KERNEL_HMAC: string;
 }
 
 export default {
@@ -32,6 +33,9 @@ export default {
       );
       if (!verify.ok) return jsonErr(401, "token_not_recognized");
 
+      const scope = (params.get("scope") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      if (scope.length === 0) return jsonErr(400, "missing_scope");
+
       const sandboxId = `vh-${knock_id ?? crypto.randomUUID().slice(0, 8)}`;
       const id = env.Sandbox.idFromName(sandboxId);
       const stub = env.Sandbox.get(id);
@@ -40,6 +44,31 @@ export default {
         method: "POST",
         body: JSON.stringify({ label, knock_id }),
       });
+
+      const freezeIds: string[] = [];
+      for (const resource of scope) {
+        const freezeBody = `scope=${encodeURIComponent(resource)}` +
+          `&reason=valhalla_session` +
+          `&session_id=${encodeURIComponent(sandboxId)}`;
+        const freezeSig = await internalHmac(env, freezeBody);
+        const freezeResp = await env.CURATOM_KERNEL.fetch(
+          `https://kernel/internal/freeze?${freezeBody}`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              "x-curatom-hmac": freezeSig,
+            },
+            body: freezeBody,
+          }
+        );
+        if (!freezeResp.ok) {
+          const detail = await freezeResp.text();
+          return jsonErr(500, `freeze_failed:${resource}:${detail}`);
+        }
+        const fb = (await freezeResp.json()) as { freeze_id: string };
+        freezeIds.push(fb.freeze_id);
+      }
 
       await env.CURATOM_LEDGER.prepare(
         `INSERT OR REPLACE INTO sessions
@@ -50,6 +79,7 @@ export default {
       return jsonOk({
         sandbox_id: sandboxId,
         url: `${env.VALHALLA_BASE_URL}/valhalla/${sandboxId}`,
+        frozen: freezeIds,
       });
     }
 
@@ -97,9 +127,66 @@ export default {
       return jsonOk({ path: filePath, body: text });
     }
 
+    if (path.match(/^\/valhalla\/[^/]+\/parity$/) && request.method === "GET") {
+      const sandboxId = path.split("/")[2];
+      const scope = params.get("scope") ?? "";
+      const operation = params.get("op") ?? "read";
+      const claimedDigest = params.get("digest") ?? "";
+      const claimedBody = params.get("claim") ?? "";
+
+      if (!scope) return jsonErr(400, "missing_scope");
+      if (!claimedDigest && !claimedBody) return jsonErr(400, "missing_digest_or_claim");
+
+      const effectiveDigest = claimedDigest || (await sha256(claimedBody));
+      const now = new Date().toISOString();
+      await env.CURATOM_LEDGER.prepare(
+        `INSERT INTO drift_log (at, kind, subject, detail, severity)
+         VALUES (?1, 'parity_claim', ?2, ?3, 'info')`
+      ).bind(
+        now,
+        sandboxId,
+        JSON.stringify({ scope, operation, digest: effectiveDigest })
+      ).run();
+
+      return jsonOk({
+        scope,
+        operation,
+        claimed_digest: effectiveDigest,
+        recorded_at: now,
+        note: "Parity claim recorded. To release freezes and close, call close with parity_ok=true and this digest as parity_note.",
+      });
+    }
+
     if (path.match(/^\/valhalla\/[^/]+\/close$/) && request.method === "GET") {
       const sandboxId = path.split("/")[2];
       const report = params.get("report") ?? "no report";
+      const parityOk = params.get("parity_ok") === "true";
+      const parityNote = params.get("parity_note") ?? "";
+
+      if (!parityOk) {
+        return jsonErr(409, "parity_not_confirmed");
+      }
+
+      const releaseBody =
+        `session_id=${encodeURIComponent(sandboxId)}` +
+        `&parity_ok=true` +
+        `&reason=${encodeURIComponent(parityNote)}`;
+      const releaseSig = await internalHmac(env, releaseBody);
+      const releaseResp = await env.CURATOM_KERNEL.fetch(
+        `https://kernel/internal/release-session?${releaseBody}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-curatom-hmac": releaseSig,
+          },
+          body: releaseBody,
+        }
+      );
+      if (!releaseResp.ok) {
+        return jsonErr(500, "release_failed");
+      }
+      const releaseJson = (await releaseResp.json()) as { released: number };
 
       const id = env.Sandbox.idFromName(sandboxId);
       const stub = env.Sandbox.get(id);
@@ -111,6 +198,8 @@ export default {
         sandbox_id: sandboxId,
         closed_at: new Date().toISOString(),
         report,
+        parity_note: parityNote,
+        freezes_released: releaseJson.released,
         log: logJson.entries,
       };
 
@@ -123,7 +212,11 @@ export default {
 
       await stub.fetch("https://sandbox/destroy", { method: "POST" });
 
-      return jsonOk({ closed: true, receipt_ref: receiptRef });
+      return jsonOk({
+        closed: true,
+        receipt_ref: receiptRef,
+        freezes_released: releaseJson.released,
+      });
     }
 
     if (path.match(/^\/valhalla\/[^/]+\/status$/) && request.method === "GET") {
@@ -163,4 +256,26 @@ function jsonErr(status: number, msg: string): Response {
 async function sha256(input: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hmacKeyBytes(secret: string): Uint8Array {
+  try {
+    const bin = atob(secret.trim());
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  } catch {
+    return new TextEncoder().encode(secret);
+  }
+}
+
+async function internalHmac(env: Env, body: string): Promise<string> {
+  const key = hmacKeyBytes(env.CURATOM_KERNEL_HMAC);
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    key,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(body));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

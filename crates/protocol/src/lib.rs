@@ -2,7 +2,8 @@
 
 pub mod access;
 pub use access::{
-    KeyLogEntry, Knock, KnockStatus, OrganicMeView, OrganicToken, OwnerRecord, KNOCK_TTL_SECS,
+    Freeze, KeyLogEntry, Knock, KnockStatus, OrganicMeView, OrganicToken, OwnerRecord,
+    KNOCK_TTL_SECS,
 };
 
 use serde::{Deserialize, Serialize};
@@ -168,6 +169,8 @@ pub struct KernelState {
     pub issued: HashSet<String>,
     pub outcomes: Vec<Outcome>,
     pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub freezes: HashMap<String, Freeze>,
 }
 
 impl KernelState {
