@@ -32,5 +32,14 @@ custom_domain = true
 binding = "CURATOM_ORCHESTRATOR"
 service = "curatom-orchestrator"
 
+# The web dashboard. Same hostname as the API -- one login, one bookmark,
+# no CORS. API paths always go to the Rust worker; everything else is the
+# dashboard, falling back to index.html so client-side routing works.
+[assets]
+directory = "./apps/mobile/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*"]
+
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"
