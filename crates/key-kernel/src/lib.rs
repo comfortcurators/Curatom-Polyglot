@@ -713,6 +713,38 @@ where
             .unwrap_or_default()
     }
 
+    /// Token + approved knock whose resources cover every declared scope id.
+    /// Stops a valid token from freezing live resources without a tap.
+    pub fn authorize_valhalla_provision(
+        &self,
+        token: &str,
+        knock_id: &str,
+        scope: &[String],
+    ) -> Result<(), String> {
+        if !self.token_matches(token) {
+            return Err("token_not_recognized".into());
+        }
+        if knock_id.is_empty() {
+            return Err("missing_knock_id".into());
+        }
+        if scope.is_empty() {
+            return Err("missing_scope".into());
+        }
+        let knock = self.get_knock(knock_id)?.ok_or_else(|| "unknown_knock".to_string())?;
+        if knock.token != token {
+            return Err("token_knock_mismatch".into());
+        }
+        if knock.status != KnockStatus::Approved {
+            return Err("knock_not_approved".into());
+        }
+        for r in scope {
+            if !knock.resources.iter().any(|x| x == r) {
+                return Err(format!("scope_not_granted:{r}"));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn freeze(
         &mut self,
         scope: String,
@@ -1010,5 +1042,43 @@ mod tests {
             Duration::SingleUse,
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn provision_requires_approved_knock() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("t".into())).unwrap();
+        let scope = vec!["hostos.inventory".to_string()];
+        assert_eq!(
+            k.authorize_valhalla_provision(&t.token, "knock_nope", &scope)
+                .unwrap_err(),
+            "unknown_knock"
+        );
+        let kn = pollster::block_on(k.create_knock(
+            t.token.clone(),
+            "V".into(),
+            "r".into(),
+            vec!["hostos.inventory".into()],
+            vec![Permission::Read],
+            Duration::SingleUse,
+        ))
+        .unwrap();
+        assert_eq!(
+            k.authorize_valhalla_provision(&t.token, &kn.id, &scope)
+                .unwrap_err(),
+            "knock_not_approved"
+        );
+        pollster::block_on(k.decide_knock(&kn.id, KnockStatus::Approved)).unwrap();
+        k.authorize_valhalla_provision(&t.token, &kn.id, &scope)
+            .unwrap();
+        assert_eq!(
+            k.authorize_valhalla_provision(
+                &t.token,
+                &kn.id,
+                &["valhalla.workspace".into()]
+            )
+            .unwrap_err(),
+            "scope_not_granted:valhalla.workspace"
+        );
     }
 }

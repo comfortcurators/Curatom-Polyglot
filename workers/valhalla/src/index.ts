@@ -28,6 +28,7 @@ export default {
       const knock_id = params.get("knock_id");
       const label = params.get("label") ?? "unnamed";
       if (!token) return jsonErr(400, "missing_token");
+      if (!knock_id) return jsonErr(400, "missing_knock_id");
 
       const verify = await env.CURATOM_KERNEL.fetch(
         `https://kernel/organic/keys/verify?token=${encodeURIComponent(token)}`
@@ -37,7 +38,28 @@ export default {
       const scope = (params.get("scope") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
       if (scope.length === 0) return jsonErr(400, "missing_scope");
 
-      const sandboxId = `vh-${knock_id ?? crypto.randomUUID().slice(0, 8)}`;
+      const authBody =
+        `knock_id=${encodeURIComponent(knock_id)}` +
+        `&token=${encodeURIComponent(token)}` +
+        `&scope=${encodeURIComponent(scope.join(","))}`;
+      const authSig = await internalHmac(env, authBody);
+      const authResp = await env.CURATOM_KERNEL.fetch(
+        `https://kernel/internal/authorize-provision?${authBody}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-curatom-hmac": authSig,
+          },
+          body: authBody,
+        }
+      );
+      if (!authResp.ok) {
+        const detail = await authResp.text();
+        return jsonErr(403, `provision_not_authorized:${detail}`);
+      }
+
+      const sandboxId = `vh-${knock_id}`;
       // SDK: get-or-create. Container starts on first exec, not here.
       getSandbox(env.Sandbox, sandboxId);
 
@@ -188,7 +210,11 @@ export default {
       if (!releaseResp.ok) {
         return jsonErr(500, "release_failed");
       }
-      const releaseJson = (await releaseResp.json()) as { released: number };
+      const releaseJson = (await releaseResp.json()) as {
+        released: number;
+        frozen?: string[];
+      };
+      const frozen = releaseJson.frozen ?? [];
       const entries = await sessionLog(env, sandboxId);
 
       const receipt = {
@@ -197,6 +223,7 @@ export default {
         report,
         parity_note: parityNote,
         freezes_released: releaseJson.released,
+        frozen,
         log: entries,
       };
 
@@ -218,6 +245,7 @@ export default {
         closed: true,
         receipt_ref: receiptRef,
         freezes_released: releaseJson.released,
+        frozen,
       });
     }
 

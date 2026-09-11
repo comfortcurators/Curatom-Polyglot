@@ -185,6 +185,9 @@ impl DurableObject for CuratomKernel {
             ("POST", "/internal/freeze") => self.h_internal_freeze(&hr).await,
             ("POST", "/internal/release") => self.h_internal_release(&hr).await,
             ("POST", "/internal/release-session") => self.h_internal_release_session(&hr).await,
+            ("POST", "/internal/authorize-provision") => {
+                self.h_internal_authorize_provision(&hr).await
+            }
             ("GET", "/organic/frozen") => self.h_frozen_list(&hr).await,
             _ => (404, json!({ "error": "not_found" })),
         };
@@ -1371,7 +1374,46 @@ impl CuratomKernel {
                 }
             }
         }
-        (200, json!({ "released": released }))
+        (200, json!({ "released": released, "frozen": to_release }))
+    }
+
+    async fn h_internal_authorize_provision(&self, hr: &HttpRequestDto) -> Reply {
+        if !self.hmac_ok(hr) {
+            return (
+                401,
+                json!({ "error": if hr.header("x-curatom-hmac").is_none() { "missing hmac" } else { "bad hmac" } }),
+            );
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(knock_id) = params.get("knock_id").cloned() else {
+            return (400, json!({ "error": "missing_knock_id" }));
+        };
+        let Some(token) = params.get("token").cloned() else {
+            return (400, json!({ "error": "missing_token" }));
+        };
+        let Some(scope_raw) = params.get("scope").cloned() else {
+            return (400, json!({ "error": "missing_scope" }));
+        };
+        let scope: Vec<String> = scope_raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.authorize_valhalla_provision(&token, &knock_id, &scope) {
+            Ok(()) => (200, json!({ "ok": true, "knock_id": knock_id })),
+            Err(e) => (403, json!({ "error": e })),
+        }
     }
 
     async fn h_frozen_list(&self, hr: &HttpRequestDto) -> Reply {
