@@ -4,7 +4,7 @@ compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
 [[containers]]
-class_name = "Sandbox"
+class_name = "SandboxDO"
 image = "./Dockerfile"
 max_instances = 10
 
@@ -14,7 +14,7 @@ class_name = "SandboxDO"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["SandboxDO"]
+new_sqlite_classes = ["SandboxDO"]
 
 [[r2_buckets]]
 binding = "CURATOM_ARTIFACTS"
