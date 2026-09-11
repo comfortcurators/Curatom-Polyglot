@@ -2,6 +2,13 @@ name = "curatom-kernel"
 main = "workers/api/build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
+# No *.workers.dev fallback. CloudflareAccessIdentityProvider treats the mere
+# presence of cf-access-jwt-assertion as the owner -- it does not verify the
+# JWT (see DEFERRED.md). That is only safe behind a route Cloudflare Access
+# actually enforces. A live workers.dev URL bypasses Access entirely and lets
+# anyone set that header themselves. Deploy on the custom domain only.
+workers_dev = false
+
 [build]
 command = "cd workers/api && worker-build --release"
 
@@ -11,12 +18,20 @@ class_name = "CuratomKernel"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["CuratomKernel"]
+new_sqlite_classes = ["CuratomKernel"]
 
 [[r2_buckets]]
 binding = "CURATOM_ARTIFACTS"
 bucket_name = "curatom-artifacts"
 
+[[routes]]
+pattern = "curatom.rajvansh.dev"
+custom_domain = true
+
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"
+# Not live anywhere yet. Contract 1 and the kernel work end-to-end; the
+# handoff at /organic/approvals/:id/approve will 502 orchestrator_unreachable
+# until Elixir is deployed somewhere this Worker can reach and this is
+# repointed at it.
 CURATOM_ORCHESTRATOR_URL = "http://localhost:4000/v1/jobs"
