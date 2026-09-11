@@ -1,4 +1,7 @@
-/target
+# Cargo: every crate's target dir, not just the workspace root.
+target/
+**/target/
+
 **/*.rs.bk
 .idea
 .vscode
@@ -14,3 +17,6 @@ apps/mobile/dist
 .env
 .env.*
 !.env.example
+
+# Seam runtime
+scripts/.seam/
