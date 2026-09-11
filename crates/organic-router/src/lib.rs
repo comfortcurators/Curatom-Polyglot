@@ -21,8 +21,21 @@ pub fn activity_view(a: &Activity) -> ActivityView {
     }
 }
 
-pub fn me_view(owner_id: &str) -> Value {
-    json!({ "id": owner_id, "kind": "organic", "role": "owner" })
+pub fn me_view(
+    owner_id: &str,
+    enrolled: bool,
+    enrolled_at: Option<String>,
+    display_name: &str,
+) -> Value {
+    json!({
+        "id": owner_id,
+        "display_name": display_name,
+        "mode": "owner",
+        "enrolled": enrolled,
+        "enrolled_at": enrolled_at,
+        "kind": "organic",
+        "role": "owner",
+    })
 }
 
 pub fn intent_view(i: &Intent) -> Value {
@@ -54,6 +67,8 @@ mod tests {
             duration: Duration::SingleUse,
             digest: "abc".into(),
             status: ApprovalStatus::Pending,
+            decision_signature_digest: None,
+            decision_signature_ref: None,
         };
         let v = serde_json::to_value(approval_view(&a)).unwrap();
         leak_check(&v).unwrap();

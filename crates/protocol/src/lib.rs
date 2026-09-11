@@ -1,5 +1,8 @@
 //! Shared types. No I/O, no Cloudflare, no time.
 
+pub mod enrollment;
+pub use enrollment::{EnrollmentSession, OrganicMeView, OwnerRecord};
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -85,6 +88,16 @@ pub enum ApprovalDecision {
     Refuse,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Organic,
+    Inorganic,
+    Signature1,
+    Signature2,
+    ApprovalSignature,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Approval {
     pub id: String,
@@ -96,6 +109,10 @@ pub struct Approval {
     pub duration: Duration,
     pub digest: String,
     pub status: ApprovalStatus,
+    #[serde(default)]
+    pub decision_signature_digest: Option<String>,
+    #[serde(default)]
+    pub decision_signature_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,6 +156,8 @@ pub struct Activity {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct KernelState {
     pub owner_id: String,
+    #[serde(default)]
+    pub owner: Option<OwnerRecord>,
     pub intents: HashMap<String, Intent>,
     pub approvals: HashMap<String, Approval>,
     pub grants: HashMap<String, CapabilitySecret>,

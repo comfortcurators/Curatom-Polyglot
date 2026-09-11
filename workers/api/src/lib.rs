@@ -18,15 +18,16 @@ on `Kernel` in crates/key-kernel/src/lib.rs.
 use worker::*;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use curatom_attestation::{hmac_hex, hmac_key_bytes, AttestationClaims};
+use curatom_enrollment::{decode_image_b64, EnrollmentFlow};
 use curatom_key_kernel::Kernel;
 use curatom_organic_router::{activity_view, approval_view, intent_view, me_view};
 use curatom_protocol::{
-    ApprovalDecision, Duration as CuratomDuration, HttpRequestDto, InorganicRequest, Outcome,
-    Permission,
+    ApprovalDecision, Duration as CuratomDuration, EnrollmentSession, HttpRequestDto,
+    InorganicRequest, Outcome, Permission,
 };
-use curatom_sign::{DevSignVerifier, SignVerifier};
 use curatom_substrate_cloudflare::{
     to_dto, CloudflareAccessIdentityProvider, CloudflareClock, DOEventLedger, DOStateStore,
     ProductionCloudflareInorganicIdentityProvider, R2ArtifactStore,
@@ -34,6 +35,8 @@ use curatom_substrate_cloudflare::{
 use curatom_ports::Clock;
 
 use serde_json::{json, Value};
+
+mod enroll_routes;
 
 type K = Kernel<DOStateStore, DOEventLedger, R2ArtifactStore, CloudflareClock>;
 
@@ -62,6 +65,7 @@ pub struct CuratomKernel {
     organic_idp: Option<CloudflareAccessIdentityProvider>,
     inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
     bucket: Option<Bucket>,
+    sessions: RefCell<HashMap<String, EnrollmentSession>>,
 }
 
 impl DurableObject for CuratomKernel {
@@ -90,6 +94,7 @@ impl DurableObject for CuratomKernel {
             organic_idp,
             inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
             bucket,
+            sessions: RefCell::new(HashMap::new()),
         }
     }
 
@@ -102,6 +107,16 @@ impl DurableObject for CuratomKernel {
 
         let (status, body) = match (method.as_str(), path.as_str()) {
             ("GET", "/organic/me") => self.h_me(&hr).await,
+            ("POST", "/organic/enroll/start") => self.h_enroll_start(&hr).await,
+            ("POST", "/organic/enroll/sign1") => {
+                self.h_enroll_sign(&hr, curatom_protocol::ArtifactKind::Signature1)
+                    .await
+            }
+            ("POST", "/organic/enroll/sign2") => {
+                self.h_enroll_sign(&hr, curatom_protocol::ArtifactKind::Signature2)
+                    .await
+            }
+            ("POST", "/organic/enroll/complete") => self.h_enroll_complete(&hr).await,
             ("POST", "/organic/intents") => self.h_create_intent(&hr).await,
             ("GET", p) if p.starts_with("/organic/intents/") => {
                 let id = p.trim_start_matches("/organic/intents/").to_string();
@@ -188,7 +203,15 @@ impl CuratomKernel {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
-        (200, me_view(&self.owner_id))
+        let owner = self.kernel.borrow().as_ref().unwrap().get_owner();
+        let (enrolled, enrolled_at, display_name) = match owner {
+            Some(o) => (true, Some(o.enrolled_at), o.display_name),
+            None => (false, None, self.owner_id.clone()),
+        };
+        (
+            200,
+            me_view(&self.owner_id, enrolled, enrolled_at, &display_name),
+        )
     }
 
     async fn h_create_intent(&self, hr: &HttpRequestDto) -> Reply {
@@ -247,17 +270,31 @@ impl CuratomKernel {
         let Ok(body) = serde_json::from_str::<Value>(&hr.body) else {
             return (400, json!({ "error": "invalid_json" }));
         };
-        let Some(sign2) = body.get("sign2").and_then(|v| v.as_str()) else {
-            return (400, json!({ "error": "missing_sign2" }));
+        let Some(image_b64) = body.get("image_b64").and_then(|v| v.as_str()) else {
+            return (400, json!({ "error": "missing_image_b64" }));
         };
-        if !matches!(
-            DevSignVerifier::new()
-                .verify("sign2", &self.owner_id, sign2, approval_id)
-                .await,
-            Ok(true)
-        ) {
-            return (403, json!({ "error": "sign2_failed" }));
-        }
+        let sig_bytes = match decode_image_b64(image_b64) {
+            Ok(b) => b,
+            Err(e) => return (400, json!({ "error": e })),
+        };
+        let bucket = match self.bucket.clone() {
+            Some(b) => b,
+            None => return (500, json!({ "error": "CURATOM_ARTIFACTS bucket missing" })),
+        };
+        let artifacts = R2ArtifactStore::new(bucket, self.owner_id.clone());
+        let flow = EnrollmentFlow::new(CloudflareClock);
+        let (sig_digest, sig_ref) = match flow
+            .capture_signature(
+                &artifacts,
+                &self.owner_id,
+                curatom_protocol::ArtifactKind::ApprovalSignature,
+                &sig_bytes,
+            )
+            .await
+        {
+            Ok(x) => x,
+            Err(e) => return (400, json!({ "error": e })),
+        };
 
         // Snapshot before borrowing the kernel mutably across awaits.
         let hmac_key = self.hmac_key.clone();
@@ -275,10 +312,17 @@ impl CuratomKernel {
         let mut k = self.kernel.borrow_mut();
         let k = k.as_mut().unwrap();
 
-        match k.decide_approval(&approval_id, ApprovalDecision::Approve).await {
+        match k
+            .decide_approval_with_signature(
+                &approval_id,
+                ApprovalDecision::Approve,
+                Some(sig_digest),
+                Some(sig_ref),
+            )
+            .await
+        {
             Ok(Some(_)) => {}
             Ok(None) => return (409, json!({ "error": "approval_not_pending" })),
-            // digest_mismatch: the card moved under the owner. Not a server fault.
             Err(e) => return (409, json!({ "error": e })),
         }
 
