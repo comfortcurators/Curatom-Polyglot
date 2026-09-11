@@ -19,4 +19,4 @@ bucket_name = "curatom-artifacts"
 
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"
-CURATOM_ORCHESTRATOR_URL = "http://localhost:4000"
+CURATOM_ORCHESTRATOR_URL = "http://localhost:4000/v1/jobs"
