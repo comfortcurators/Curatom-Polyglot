@@ -40,11 +40,25 @@ export default {
       } catch (e) {
         console.log("ORCH_CONTAINER_FETCH_THREW", String(e), e?.stack);
         return new Response(
-          JSON.stringify({ error: "container_fetch_failed", detail: String(e) }),
-          { status: 502, headers: { "content-type": "application/json" } },
+          JSON.stringify({
+            ok: false,
+            gateway_version: "ORCH_HANDLER_V2",
+            gateway_seen: request.headers.get("x-curatom-probe") ?? "no_probe",
+            container_status: "no_container_call",
+            error: String(e),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      return resp;
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          gateway_version: "ORCH_HANDLER_V2",
+          gateway_seen: request.headers.get("x-curatom-probe") ?? "no_probe",
+          container_status: typeof resp !== "undefined" ? resp.status : "no_container_call",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
     }
     return new Response("not found", { status: 404 });
   },

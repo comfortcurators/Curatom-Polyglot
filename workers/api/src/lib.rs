@@ -342,8 +342,15 @@ impl CuratomKernel {
         };
 
         match post_signed(&fetcher, &raw, &hmac_key).await {
-            Ok(code) if code < 400 => (200, json!({ "ok": true, "job_handed_off": true })),
-            Ok(code) => (502, json!({ "error": format!("orchestrator status {code}") })),
+            Ok((code, body)) if code < 400 => (
+                200,
+                json!({
+                    "ok": true,
+                    "job_handed_off": true,
+                    "orchestrator_response": body,
+                }),
+            ),
+            Ok((code, _)) => (502, json!({ "error": format!("orchestrator status {code}") })),
             Err(e) => (502, json!({ "error": format!("service binding send: {e}") })),
         }
     }
@@ -468,7 +475,7 @@ impl CuratomKernel {
 /// Contract 2's one POST. Service binding, not a public URL.
 /// `Fetcher::fetch_request` takes `worker::Request` (TryInto<Request>).
 /// Response status is `status_code()`, not `status()`.
-async fn post_signed(fetcher: &Fetcher, raw: &str, key: &[u8]) -> Result<u16> {
+async fn post_signed(fetcher: &Fetcher, raw: &str, key: &[u8]) -> Result<(u16, String)> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     headers.set("x-curatom-hmac", &hmac_hex(raw.as_bytes(), key))?;
@@ -480,6 +487,8 @@ async fn post_signed(fetcher: &Fetcher, raw: &str, key: &[u8]) -> Result<u16> {
         .with_body(Some(wasm_bindgen::JsValue::from_str(raw)));
 
     let req = Request::new_with_init("https://curatom-orchestrator/v1/jobs", &init)?;
-    let resp = fetcher.fetch_request(req).await?;
-    Ok(resp.status_code())
+    let mut resp = fetcher.fetch_request(req).await?;
+    let status = resp.status_code();
+    let body = resp.text().await.unwrap_or_default();
+    Ok((status, body))
 }
