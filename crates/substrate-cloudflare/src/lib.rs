@@ -25,7 +25,7 @@ impl DOStateStore {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StateStore for DOStateStore {
     async fn get(&self) -> Result<Option<KernelState>, String> {
         match self.storage.get::<KernelState>("kernel_state").await {
@@ -51,7 +51,7 @@ impl DOEventLedger {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl EventLedger for DOEventLedger {
     async fn append(&self, kind: &str, body: &str) -> Result<(), String> {
         let key = format!("ledger:{}:{}", kind, body);
@@ -76,7 +76,7 @@ impl R2ArtifactStore {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl ArtifactStore for R2ArtifactStore {
     async fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
         let k = format!("{}/{}", self.prefix, key);

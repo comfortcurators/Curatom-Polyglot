@@ -18,7 +18,7 @@ impl MemoryStateStore {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl StateStore for MemoryStateStore {
     async fn get(&self) -> Result<Option<KernelState>, String> {
         Ok(self.inner.lock().unwrap().clone())
@@ -40,7 +40,7 @@ impl MemoryLedger {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl EventLedger for MemoryLedger {
     async fn append(&self, kind: &str, body: &str) -> Result<(), String> {
         self.inner.lock().unwrap().push((kind.into(), body.into()));
@@ -59,7 +59,7 @@ impl MemoryArtifacts {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl ArtifactStore for MemoryArtifacts {
     async fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
         self.inner.lock().unwrap().insert(key.into(), bytes.to_vec());
