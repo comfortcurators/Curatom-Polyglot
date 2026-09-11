@@ -43,8 +43,16 @@ type Reply = (u16, Value);
 /// How long an attestation is good for once handed to Elixir.
 const ATTESTATION_TTL_SECONDS: i64 = 300;
 
+#[event(fetch)]
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    let ns = env.durable_object("CURATOM_KERNEL")?;
+    let id = ns.id_from_name(&env.var("CURATOM_OWNER_ID")?.to_string())?;
+    id.get_stub()?.fetch_with_request(req).await
+}
+
 #[durable_object]
 pub struct CuratomKernel {
+
     state: State,
     kernel: Option<K>,
     owner_id: String,

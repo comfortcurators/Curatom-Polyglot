@@ -17,6 +17,10 @@ apps/mobile/dist
 .env
 .env.*
 !.env.example
+.dev.vars
+workers/api/build/
+
+
 
 # Seam runtime
 scripts/.seam/
