@@ -1,0 +1,10 @@
+[package]
+name = "curatom-inorganic-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+curatom-protocol = { path = "../protocol" }
+serde_json.workspace = true

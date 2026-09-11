@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+.idea
+.vscode
+.DS_Store
+orchestrator/_build
+orchestrator/deps
+orchestrator/.elixir_ls
+orchestrator/erl_crash.dump
+apps/mobile/node_modules
+apps/mobile/.expo
+apps/mobile/dist
+*.wasm
+.env
+.env.*
+!.env.example

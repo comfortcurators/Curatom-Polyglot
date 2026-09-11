@@ -1,0 +1,19 @@
+[package]
+name = "curatom-key-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+curatom-crypto = { path = "../crypto" }
+curatom-ports = { path = "../ports" }
+curatom-protocol = { path = "../protocol" }
+curatom-resource-registry = { path = "../resource-registry" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+curatom-substrate-memory = { path = "../substrate-memory" }
+pollster = "0.4"

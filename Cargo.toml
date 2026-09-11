@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/crypto",
+    "crates/ports",
+    "crates/key-kernel",
+    "crates/resource-registry",
+    "crates/sign",
+    "crates/attestation",
+    "crates/execution",
+    "crates/organic-router",
+    "crates/inorganic-router",
+    "crates/substrate-memory",
+]
+# workers/api and crates/substrate-cloudflare are wasm/workers-rs only.
+# They are not workspace members so `cargo test --workspace` stays native.
+# Build the worker with wrangler / cargo check --target wasm32-unknown-unknown
+# from workers/api once the wasm target is installed.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["Comfort Curators Private Limited"]
+publish = false
+
+[workspace.dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+hex = "0.4"
+hmac = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+getrandom = "0.2"

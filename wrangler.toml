@@ -1,0 +1,16 @@
+name = "curatom-kernel"
+main = "workers/api/src/lib.rs"
+compatibility_date = "2026-09-01"
+
+[durable_objects]
+bindings = [
+  { name = "CURATOM_KERNEL", class_name = "CuratomKernel" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["CuratomKernel"]
+
+[[r2_buckets]]
+binding = "CURATOM_ARTIFACTS"
+bucket_name = "curatom-artifacts"

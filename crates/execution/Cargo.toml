@@ -1,0 +1,11 @@
+[package]
+name = "curatom-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+curatom-protocol = { path = "../protocol" }
+serde_json.workspace = true
