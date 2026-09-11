@@ -43,33 +43,48 @@ export async function claim(displayName?: string) {
   return body as { owner_id: string; display_name: string; claimed_at: string };
 }
 
-export async function createIntent(text: string) {
-  const { status, body } = await jpost("/organic/intents", { text });
-  if (status !== 201) throw new Error(`intent: ${status}`);
-  return body;
+export type TokenInfo = { token: string; file_text: string; created_at: string };
+
+export async function getToken(): Promise<TokenInfo> {
+  const { status, body } = await jget("/organic/token");
+  if (status !== 200) throw new Error(`token: ${status}`);
+  return body as TokenInfo;
 }
 
-export async function listApprovals() {
-  const { status, body } = await jget("/organic/approvals");
-  if (status !== 200) throw new Error(`approvals: ${status}`);
-  return body as Array<{
-    id: string;
-    requester: string;
-    reason: string;
-    resources: string[];
-    permissions: string[];
-    duration: string;
-  }>;
+export async function rotateToken(): Promise<{ token: string; created_at: string }> {
+  const { status, body } = await jpost("/organic/token/rotate", {});
+  if (status !== 200) throw new Error(`rotate: ${status} ${JSON.stringify(body)}`);
+  return body as { token: string; created_at: string };
 }
 
-export async function approve(approvalId: string) {
-  const { status, body } = await jpost(`/organic/approvals/${approvalId}/approve`, {});
+export type Knock = {
+  id: string;
+  name: string;
+  reason: string;
+  resources: string[];
+  permissions: string[];
+  duration: any;
+  expires_at: string;
+  seconds_remaining: number;
+};
+
+export async function listKnocks(): Promise<Knock[]> {
+  const { status, body } = await jget("/organic/knocks");
+  if (status !== 200) throw new Error(`knocks: ${status}`);
+  return body as Knock[];
+}
+
+export async function approveKnock(knockId: string, turnstileToken: string) {
+  const { status, body } = await jpost(
+    `/organic/knocks/${knockId}/approve`,
+    { turnstile_token: turnstileToken }
+  );
   if (status !== 200) throw new Error(`approve: ${status} ${JSON.stringify(body)}`);
   return body;
 }
 
-export async function refuse(approvalId: string) {
-  const { status, body } = await jpost(`/organic/approvals/${approvalId}/refuse`, {});
+export async function refuseKnock(knockId: string) {
+  const { status, body } = await jpost(`/organic/knocks/${knockId}/refuse`, {});
   if (status !== 200) throw new Error(`refuse: ${status}`);
   return body;
 }

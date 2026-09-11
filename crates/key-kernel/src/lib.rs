@@ -1,6 +1,6 @@
 //! Capability kernel. TTL as integers. No Cloudflare imports.
 
-use curatom_crypto::{random_id, request_digest};
+use curatom_crypto::{iso_plus_secs, random_id, request_digest, sha256_hex};
 use curatom_ports::{ArtifactStore, Clock, EventLedger, StateStore};
 use curatom_protocol::*;
 use curatom_resource_registry::known_resource;
@@ -395,6 +395,267 @@ where
             .cloned()
             .collect())
     }
+
+    pub fn get_token(&self) -> Option<OrganicToken> {
+        self.st().ok()?.tokens.values().next().cloned()
+    }
+
+    pub fn token_matches(&self, token: &str) -> bool {
+        self.st()
+            .map(|s| s.tokens.contains_key(token))
+            .unwrap_or(false)
+    }
+
+    pub async fn ensure_token(&mut self) -> Result<OrganicToken, String> {
+        if let Some(t) = self.get_token() {
+            return Ok(t);
+        }
+        let raw = random_id("tok").to_uppercase().replace('_', "-");
+        let token = format!("RAJVANSH-{raw}");
+        let t = OrganicToken {
+            token: token.clone(),
+            owner_id: self.owner_id.clone(),
+            created_at: self.clock.now_iso(),
+        };
+        {
+            let st = self.st_mut()?;
+            st.tokens.insert(t.token.clone(), t.clone());
+        }
+        self.note(
+            "token.created",
+            format!("token {}", &token[..token.len().min(24)]),
+            None,
+            None,
+        );
+        self.persist().await?;
+        Ok(t)
+    }
+
+    pub async fn rotate_token(&mut self) -> Result<OrganicToken, String> {
+        {
+            let st = self.st_mut()?;
+            st.tokens.clear();
+        }
+        self.note("token.rotated", "token rerolled", None, None);
+        self.persist().await?;
+        self.ensure_token().await
+    }
+
+    pub async fn create_knock(
+        &mut self,
+        token: String,
+        name: String,
+        reason: String,
+        resources: Vec<String>,
+        permissions: Vec<Permission>,
+        duration: Duration,
+    ) -> Result<Knock, String> {
+        if !self.token_matches(&token) {
+            return Err("token_not_recognized".into());
+        }
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("name_required".into());
+        }
+        if name.len() > 200 {
+            return Err("name_too_long".into());
+        }
+        if reason.len() > 2000 {
+            return Err("reason_too_long".into());
+        }
+        if resources.is_empty() || permissions.is_empty() {
+            return Err("empty_scope".into());
+        }
+        let mut resources = resources;
+        resources.sort();
+        resources.dedup();
+        let mut permissions = permissions;
+        permissions.sort();
+        permissions.dedup();
+
+        let canonical = serde_json::json!({
+            "owner_id": self.owner_id,
+            "token": token,
+            "name": name,
+            "reason": reason,
+            "resources": resources,
+            "permissions": permissions.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            "duration": duration,
+        });
+        let digest = sha256_hex(canonical.to_string().as_bytes());
+        let created = self.clock.now_iso();
+        let expires_unix = self.clock.now_unix() + KNOCK_TTL_SECS;
+        let expires = iso_plus_secs(&created, KNOCK_TTL_SECS);
+        let k = Knock {
+            id: random_id("knock"),
+            owner_id: self.owner_id.clone(),
+            token,
+            name,
+            reason,
+            resources,
+            permissions,
+            duration,
+            created_at: created,
+            expires_at: expires,
+            expires_unix,
+            status: KnockStatus::Pending,
+            decided_at: None,
+            request_digest: digest,
+        };
+        let kid = k.id.clone();
+        let kname = k.name.clone();
+        {
+            let st = self.st_mut()?;
+            st.knocks.insert(kid.clone(), k.clone());
+        }
+        self.note("knock.created", kname, Some(kid), None);
+        self.persist().await?;
+        Ok(k)
+    }
+
+    pub fn list_pending_knocks(&self) -> Result<Vec<Knock>, String> {
+        let now = self.clock.now_unix();
+        let now_iso = self.clock.now_iso();
+        let mut v: Vec<_> = self
+            .st()?
+            .knocks
+            .values()
+            .filter(|k| k.status == KnockStatus::Pending && !knock_expired(k, now, &now_iso))
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(v)
+    }
+
+    pub fn get_knock(&self, id: &str) -> Result<Option<Knock>, String> {
+        Ok(self.st()?.knocks.get(id).cloned())
+    }
+
+    pub async fn sweep_expired_knocks(&mut self) -> Result<(), String> {
+        let now = self.clock.now_unix();
+        let now_iso = self.clock.now_iso();
+        let expired: Vec<String> = self
+            .st()?
+            .knocks
+            .values()
+            .filter(|k| k.status == KnockStatus::Pending && knock_expired(k, now, &now_iso))
+            .map(|k| k.id.clone())
+            .collect();
+        if expired.is_empty() {
+            return Ok(());
+        }
+        {
+            let st = self.st_mut()?;
+            for id in &expired {
+                if let Some(k) = st.knocks.get_mut(id) {
+                    k.status = KnockStatus::Expired;
+                    k.decided_at = Some(now_iso.clone());
+                }
+            }
+        }
+        for id in expired {
+            self.note("knock.expired", id, None, None);
+        }
+        self.persist().await
+    }
+
+    pub async fn decide_knock(
+        &mut self,
+        knock_id: &str,
+        decision: KnockStatus,
+    ) -> Result<Knock, String> {
+        if !matches!(decision, KnockStatus::Approved | KnockStatus::Refused) {
+            return Err("bad_decision".into());
+        }
+        let now = self.clock.now_unix();
+        let now_iso = self.clock.now_iso();
+        let expired_now;
+        {
+            let st = self.st_mut()?;
+            let k = st
+                .knocks
+                .get_mut(knock_id)
+                .ok_or_else(|| "unknown_knock".to_string())?;
+            if k.status != KnockStatus::Pending {
+                return Err("knock_not_pending".into());
+            }
+            if knock_expired(k, now, &now_iso) {
+                k.status = KnockStatus::Expired;
+                k.decided_at = Some(now_iso.clone());
+                expired_now = true;
+            } else {
+                k.status = decision;
+                k.decided_at = Some(now_iso);
+                expired_now = false;
+            }
+        }
+        if expired_now {
+            self.persist().await?;
+            return Err("knock_expired".into());
+        }
+        let k = self.get_knock(knock_id)?.unwrap();
+        let ev = match decision {
+            KnockStatus::Approved => "knock.approved",
+            KnockStatus::Refused => "knock.refused",
+            _ => "knock.decided",
+        };
+        self.note(ev, &k.name, Some(k.id.clone()), None);
+        self.persist().await?;
+        Ok(k)
+    }
+
+    pub async fn issue_knock_grant(&mut self, knock: &Knock) -> Result<Option<IssuedGrant>, String> {
+        if self.st()?.issued.contains(&knock.id) {
+            return Ok(None);
+        }
+        if knock.status != KnockStatus::Approved {
+            return Ok(None);
+        }
+        let now = self.clock.now_unix();
+        let (expires_unix, expires_at) = match &knock.duration {
+            Duration::SingleUse => (0, None),
+            Duration::Ttl { seconds } => {
+                let exp = now + *seconds as i64;
+                (exp, Some(exp.to_string()))
+            }
+        };
+        let secret = CapabilitySecret {
+            token: random_id("tok"),
+            grant_id: random_id("grt"),
+            requester_id: format!("knock:{}", knock.id),
+            resources: knock.resources.clone(),
+            permissions: knock.permissions.clone(),
+            request_digest: knock.request_digest.clone(),
+            intent_id: knock.id.clone(),
+            expires_at,
+            expires_unix,
+        };
+        {
+            let st = self.st_mut()?;
+            st.grants.insert(secret.grant_id.clone(), secret.clone());
+            st.issued.insert(knock.id.clone());
+        }
+        self.note(
+            "grant.issued",
+            "A grant was issued.",
+            Some(knock.id.clone()),
+            None,
+        );
+        self.persist().await?;
+        Ok(Some(IssuedGrant {
+            grant_id: secret.grant_id.clone(),
+            approval_id: knock.id.clone(),
+            handle: GrantHandle { secret },
+        }))
+    }
+}
+
+fn knock_expired(k: &Knock, now_unix: i64, now_iso: &str) -> bool {
+    if k.expires_unix != 0 {
+        now_unix > k.expires_unix
+    } else {
+        now_iso > k.expires_at.as_str()
+    }
 }
 
 #[cfg(test)]
@@ -505,5 +766,53 @@ mod tests {
         let appr = k.list_pending_approvals().unwrap().into_iter().next().unwrap();
         pollster::block_on(k.decide_approval(&appr.id, ApprovalDecision::Refuse)).unwrap();
         assert!(pollster::block_on(k.issue_grant(&appr.id)).unwrap().is_none());
+    }
+
+    #[test]
+    fn token_rotate_kills_old() {
+        let mut k = k(1_700_000_000);
+        let t1 = pollster::block_on(k.ensure_token()).unwrap();
+        assert!(t1.token.starts_with("RAJVANSH-"));
+        assert!(k.token_matches(&t1.token));
+        let t2 = pollster::block_on(k.rotate_token()).unwrap();
+        assert_ne!(t1.token, t2.token);
+        assert!(!k.token_matches(&t1.token));
+        assert!(k.token_matches(&t2.token));
+    }
+
+    #[test]
+    fn knock_expires_after_ttl() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.ensure_token()).unwrap();
+        let kn = pollster::block_on(k.create_knock(
+            t.token.clone(),
+            "Claude".into(),
+            "read inventory".into(),
+            vec!["hostos.inventory".into()],
+            vec![Permission::Read],
+            Duration::SingleUse,
+        ))
+        .unwrap();
+        assert_eq!(k.list_pending_knocks().unwrap().len(), 1);
+        k.clock().set(1_700_000_000 + 89);
+        pollster::block_on(k.sweep_expired_knocks()).unwrap();
+        assert!(k.list_pending_knocks().unwrap().is_empty());
+        let got = k.get_knock(&kn.id).unwrap().unwrap();
+        assert_eq!(got.status, KnockStatus::Expired);
+    }
+
+    #[test]
+    fn unknown_token_cannot_knock() {
+        let mut k = k(1_700_000_000);
+        let err = pollster::block_on(k.create_knock(
+            "RAJVANSH-NOPE".into(),
+            "X".into(),
+            "r".into(),
+            vec!["hostos.inventory".into()],
+            vec![Permission::Read],
+            Duration::SingleUse,
+        ))
+        .unwrap_err();
+        assert_eq!(err, "token_not_recognized");
     }
 }

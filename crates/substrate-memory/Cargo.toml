@@ -9,3 +9,4 @@ publish.workspace = true
 async-trait.workspace = true
 curatom-ports = { path = "../ports" }
 curatom-protocol = { path = "../protocol" }
+curatom-crypto = { path = "../crypto" }

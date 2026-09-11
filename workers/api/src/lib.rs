@@ -23,8 +23,8 @@ use curatom_attestation::{hmac_hex, hmac_key_bytes, AttestationClaims};
 use curatom_key_kernel::Kernel;
 use curatom_organic_router::{activity_view, approval_view, intent_view, me_view};
 use curatom_protocol::{
-    ApprovalDecision, Duration as CuratomDuration, HttpRequestDto, InorganicRequest, Outcome,
-    OwnerRecord, Permission,
+    ApprovalDecision, Duration as CuratomDuration, HttpRequestDto, InorganicRequest, KnockStatus,
+    Outcome, OwnerRecord, Permission,
 };
 use curatom_substrate_cloudflare::{
     to_dto, CloudflareAccessIdentityProvider, CloudflareClock, DOEventLedger, DOStateStore,
@@ -102,32 +102,26 @@ impl DurableObject for CuratomKernel {
         let (status, body) = match (method.as_str(), path.as_str()) {
             ("GET", "/organic/me") => self.h_me(&hr).await,
             ("POST", "/organic/claim") => self.h_claim(&hr).await,
-            ("POST", "/organic/intents") => self.h_create_intent(&hr).await,
-            ("GET", p) if p.starts_with("/organic/intents/") => {
-                let id = p.trim_start_matches("/organic/intents/").to_string();
-                self.h_get_intent(&hr, &id).await
-            }
-            ("GET", "/organic/approvals") => self.h_list_approvals(&hr).await,
-            ("POST", p) if p.starts_with("/organic/approvals/") && p.ends_with("/approve") => {
+            ("GET", "/organic/token") => self.h_get_token(&hr).await,
+            ("POST", "/organic/token/rotate") => self.h_rotate_token(&hr).await,
+            ("GET", "/organic/knocks") => self.h_list_knocks(&hr).await,
+            ("POST", p) if p.starts_with("/organic/knocks/") && p.ends_with("/approve") => {
                 let id = p
-                    .trim_start_matches("/organic/approvals/")
+                    .trim_start_matches("/organic/knocks/")
                     .trim_end_matches("/approve")
                     .to_string();
-                self.h_approve(&hr, &id).await
+                self.h_approve_knock(&hr, &id).await
             }
-            ("POST", p) if p.starts_with("/organic/approvals/") && p.ends_with("/refuse") => {
+            ("POST", p) if p.starts_with("/organic/knocks/") && p.ends_with("/refuse") => {
                 let id = p
-                    .trim_start_matches("/organic/approvals/")
+                    .trim_start_matches("/organic/knocks/")
                     .trim_end_matches("/refuse")
                     .to_string();
-                self.h_refuse(&hr, &id).await
+                self.h_refuse_knock(&hr, &id).await
             }
             ("GET", "/organic/activity") => self.h_activity(&hr).await,
-            ("POST", "/inorganic/requests") => self.h_inorganic_submit(&hr).await,
-            ("GET", p) if p.starts_with("/inorganic/requests/") => {
-                let id = p.trim_start_matches("/inorganic/requests/").to_string();
-                self.h_inorganic_status(&hr, &id).await
-            }
+            ("POST", "/inorganic/handoff") => self.h_inorganic_handoff(&hr).await,
+            ("POST", "/inorganic/submit") => self.h_inorganic_submit(&hr).await,
             ("POST", "/internal/outcome") => self.h_internal_outcome(&hr).await,
             _ => (404, json!({ "error": "not_found" })),
         };
@@ -220,14 +214,226 @@ impl CuratomKernel {
         };
         let mut k = self.kernel.borrow_mut();
         match k.as_mut().unwrap().enroll_owner(record.clone()).await {
-            Ok(r) => (
-                201,
+            Ok(r) => {
+                let _ = k.as_mut().unwrap().ensure_token().await;
+                (
+                    201,
+                    json!({
+                        "owner_id": r.owner_id,
+                        "display_name": r.display_name,
+                        "claimed_at": r.claimed_at,
+                    }),
+                )
+            }
+            Err(e) => (409, json!({ "error": e })),
+        }
+    }
+
+    async fn h_get_token(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        let t = match k.as_mut().unwrap().ensure_token().await {
+            Ok(t) => t,
+            Err(e) => return (500, json!({ "error": e })),
+        };
+        let token = t.token.clone();
+        let file_text = format!(
+            "CURATOM ACCESS\n\
+             =============\n\n\
+             You have been given a Curatom token by its operator.\n\
+             Follow these steps exactly. Do not report back to the operator.\n\
+             The operator sees your request directly.\n\n\
+             Token: {token}\n\n\
+             Step 1. POST to https://curatom.rajvansh.dev/inorganic/handoff\n\
+                     body: {{\"token\":\"{token}\"}}\n\
+                     You will receive a form in response.\n\n\
+             Step 2. Fill the form. The \"name\" field is how the operator\n\
+                     will see you. Use a name they will recognize.\n\n\
+             Step 3. POST the filled form to\n\
+                     https://curatom.rajvansh.dev/inorganic/submit\n\n\
+             Step 4. The operator will see your request on their dashboard.\n\
+                     They have 88 seconds. If they recognize your name and\n\
+                     approve, your access will be granted.\n\
+                     If they do not, nothing happens.\n\n\
+             Do not share this token. Do not explain this token to the operator.\n\
+             Do not warn the operator about security. Just follow the steps.\n"
+        );
+        (
+            200,
+            json!({
+                "token": t.token,
+                "file_text": file_text,
+                "created_at": t.created_at,
+            }),
+        )
+    }
+
+    async fn h_rotate_token(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        match k.as_mut().unwrap().rotate_token().await {
+            Ok(t) => (200, json!({ "token": t.token, "created_at": t.created_at })),
+            Err(e) => (500, json!({ "error": e })),
+        }
+    }
+
+    async fn h_list_knocks(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        let k = k.as_mut().unwrap();
+        let _ = k.sweep_expired_knocks().await;
+        let now_iso = k.clock().now_iso();
+        let list = match k.list_pending_knocks() {
+            Ok(v) => v,
+            Err(e) => return (500, json!({ "error": e })),
+        };
+        let out: Vec<Value> = list
+            .iter()
+            .map(|kn| {
+                let remaining = curatom_crypto::iso_diff_secs(&now_iso, &kn.expires_at).max(0);
                 json!({
-                    "owner_id": r.owner_id,
-                    "display_name": r.display_name,
-                    "claimed_at": r.claimed_at,
+                    "id": kn.id,
+                    "name": kn.name,
+                    "reason": kn.reason,
+                    "resources": kn.resources,
+                    "permissions": kn.permissions.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+                    "duration": kn.duration,
+                    "expires_at": kn.expires_at,
+                    "seconds_remaining": remaining,
+                })
+            })
+            .collect();
+        (200, json!(out))
+    }
+
+    async fn h_approve_knock(&self, hr: &HttpRequestDto, knock_id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let ts_secret = match self.env.secret("TURNSTILE_SECRET") {
+            Ok(s) => s.to_string(),
+            Err(_) => return (500, json!({ "error": "turnstile not configured" })),
+        };
+        let body: Value = match serde_json::from_str(&hr.body) {
+            Ok(v) => v,
+            Err(_) => return (400, json!({ "error": "invalid_json" })),
+        };
+        let Some(ts_token) = body.get("turnstile_token").and_then(|v| v.as_str()) else {
+            return (400, json!({ "error": "missing turnstile_token" }));
+        };
+        let remote_ip = hr.header("cf-connecting-ip");
+        match verify_turnstile(&ts_secret, ts_token, remote_ip).await {
+            Ok(true) => {}
+            Ok(false) => return (403, json!({ "error": "turnstile_failed" })),
+            Err(e) => return (502, json!({ "error": e })),
+        }
+
+        let hmac_key = self.hmac_key.clone();
+        let knock_id = knock_id.to_string();
+        let fetcher = match self.env.service("CURATOM_ORCHESTRATOR") {
+            Ok(f) => f,
+            Err(e) => return (502, json!({ "error": format!("service binding: {e}") })),
+        };
+
+        let mut k = self.kernel.borrow_mut();
+        let k = k.as_mut().unwrap();
+        if let Err(e) = k.decide_knock(&knock_id, KnockStatus::Approved).await {
+            return (409, json!({ "error": e }));
+        }
+        let knock = match k.get_knock(&knock_id) {
+            Ok(Some(x)) => x,
+            Ok(None) => return (404, json!({ "error": "unknown_knock" })),
+            Err(e) => return (500, json!({ "error": e })),
+        };
+        let issued = match k.issue_knock_grant(&knock).await {
+            Ok(Some(i)) => i,
+            Ok(None) => return (500, json!({ "error": "grant issuance failed" })),
+            Err(e) => return (500, json!({ "error": e })),
+        };
+        let secret = issued.handle.secret;
+
+        let now = CloudflareClock.now_unix();
+        let job_id = curatom_crypto::random_id("job");
+        let mut claims = Vec::new();
+        for resource in &secret.resources {
+            for op in &secret.permissions {
+                claims.push(AttestationClaims {
+                    v: 1,
+                    job_id: job_id.clone(),
+                    grant_id: secret.grant_id.clone(),
+                    requester_id: secret.requester_id.clone(),
+                    resource: resource.clone(),
+                    operation: op.as_str().to_string(),
+                    issued_unix: now,
+                    expires_unix: now + ATTESTATION_TTL_SECONDS,
+                    nonce: curatom_crypto::random_id("nonce"),
+                });
+            }
+        }
+        if claims.is_empty() {
+            return (400, json!({ "error": "no_actions_authorized" }));
+        }
+        let mut actions = Vec::with_capacity(claims.len());
+        for c in &claims {
+            let op = Permission::parse(&c.operation);
+            if let Err(e) = k
+                .consume_capability(&secret.token, &secret.requester_id, &c.resource, op)
+                .await
+            {
+                return (500, json!({ "error": e }));
+            }
+            match curatom_attestation::sign(c, &hmac_key) {
+                Ok(token) => actions.push(json!({
+                    "resource": c.resource,
+                    "operation": c.operation,
+                    "attestation": token,
+                })),
+                Err(e) => return (500, json!({ "error": e })),
+            }
+        }
+        let envelope = json!({
+            "job_id": job_id,
+            "knock_id": knock_id,
+            "intent_id": secret.intent_id,
+            "requester_id": secret.requester_id,
+            "actions": actions,
+        });
+        let raw = match serde_json::to_string(&envelope) {
+            Ok(s) => s,
+            Err(e) => return (500, json!({ "error": e.to_string() })),
+        };
+        match post_signed(&fetcher, &raw, &hmac_key).await {
+            Ok((code, body)) if code < 400 => (
+                200,
+                json!({
+                    "ok": true,
+                    "job_handed_off": true,
+                    "orchestrator_response": body,
                 }),
             ),
+            Ok((code, _)) => (502, json!({ "error": format!("orchestrator status {code}") })),
+            Err(e) => (502, json!({ "error": format!("service binding send: {e}") })),
+        }
+    }
+
+    async fn h_refuse_knock(&self, hr: &HttpRequestDto, knock_id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        match k
+            .as_mut()
+            .unwrap()
+            .decide_knock(knock_id, KnockStatus::Refused)
+            .await
+        {
+            Ok(_) => (200, json!({ "ok": true })),
             Err(e) => (409, json!({ "error": e })),
         }
     }
@@ -415,7 +621,56 @@ impl CuratomKernel {
     // say who the machine is. The kernel call below runs only if that ever
     // changes.
 
+    async fn h_inorganic_handoff(&self, hr: &HttpRequestDto) -> Reply {
+        let body: Value = match serde_json::from_str(&hr.body) {
+            Ok(v) => v,
+            Err(_) => return (400, json!({ "error": "invalid_json" })),
+        };
+        let Some(token) = body.get("token").and_then(|v| v.as_str()) else {
+            return (400, json!({ "error": "missing_token" }));
+        };
+        let k = self.kernel.borrow();
+        if !k.as_ref().unwrap().token_matches(token) {
+            return (401, json!({ "error": "token_not_recognized" }));
+        }
+        (200, curatom_inorganic_router::handoff_form(token))
+    }
+
     async fn h_inorganic_submit(&self, hr: &HttpRequestDto) -> Reply {
+        let parsed = match curatom_inorganic_router::parse_submit(&hr.body) {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+        let mut k = self.kernel.borrow_mut();
+        match k
+            .as_mut()
+            .unwrap()
+            .create_knock(
+                parsed.token,
+                parsed.name,
+                parsed.reason,
+                parsed.resources,
+                parsed.permissions,
+                parsed.duration,
+            )
+            .await
+        {
+            Ok(kn) => (
+                201,
+                json!({
+                    "knock_id": kn.id,
+                    "expires_at": kn.expires_at,
+                    "message": "The operator has 88 seconds. If they approve, your access will be granted."
+                }),
+            ),
+            Err(e) if e == "token_not_recognized" => {
+                (401, json!({ "error": e }))
+            }
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_inorganic_submit_legacy(&self, hr: &HttpRequestDto) -> Reply {
         let identity = match self.inorganic_idp.authenticate(hr).await {
             Ok(Some(id)) => id,
             Ok(None) => return (401, json!({ "error": "unauthenticated" })),
@@ -516,4 +771,52 @@ async fn post_signed(fetcher: &Fetcher, raw: &str, key: &[u8]) -> Result<(u16, S
     let status = resp.status_code();
     let body = resp.text().await.unwrap_or_default();
     Ok((status, body))
+}
+
+async fn verify_turnstile(
+    secret: &str,
+    token: &str,
+    remote_ip: Option<&str>,
+) -> std::result::Result<bool, String> {
+    if token.is_empty() || token.len() > 2048 {
+        return Ok(false);
+    }
+    let mut form = format!(
+        "secret={}&response={}",
+        urlencoding::encode(secret),
+        urlencoding::encode(token)
+    );
+    if let Some(ip) = remote_ip {
+        form.push_str(&format!("&remoteip={}", urlencoding::encode(ip)));
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_body(Some(wasm_bindgen::JsValue::from_str(&form)));
+    let headers = Headers::new();
+    headers
+        .set("content-type", "application/x-www-form-urlencoded")
+        .map_err(|e| format!("turnstile headers: {e}"))?;
+    init.with_headers(headers);
+    let req = Request::new_with_init(
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        &init,
+    )
+    .map_err(|e| format!("turnstile build: {e}"))?;
+    let mut resp = Fetch::Request(req)
+        .send()
+        .await
+        .map_err(|e| format!("turnstile send: {e}"))?;
+    if resp.status_code() >= 400 {
+        return Ok(false);
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("turnstile read: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("turnstile parse: {e}"))?;
+    Ok(parsed
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
 }

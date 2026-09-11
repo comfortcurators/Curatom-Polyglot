@@ -84,13 +84,14 @@ impl FrozenClock {
     pub fn new(unix: i64) -> Self {
         Self {
             unix: AtomicI64::new(unix),
-            iso: Mutex::new(unix.to_string()),
+            iso: Mutex::new(curatom_crypto::iso_plus_secs("1970-01-01T00:00:00Z", unix)),
         }
     }
 
     pub fn set(&self, unix: i64) {
         self.unix.store(unix, Ordering::SeqCst);
-        *self.iso.lock().unwrap() = unix.to_string();
+        *self.iso.lock().unwrap() =
+            curatom_crypto::iso_plus_secs("1970-01-01T00:00:00Z", unix);
     }
 }
 

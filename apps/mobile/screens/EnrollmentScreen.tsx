@@ -22,13 +22,12 @@ export default function EnrollmentScreen({ onEnrolled }: { onEnrolled: () => voi
     <View style={s.root}>
       <Text style={s.h1}>You are the operator.</Text>
       <Text style={s.sub}>
-        Curatom is a system where you say what you want in plain language, and machines do the
-        work without you touching infrastructure. You are not the operator of the machine. You
-        are the one who says what should happen.
+        Curatom is where machines ask you for things. You say yes or no.
+        Nothing else.
       </Text>
       <Text style={s.sub}>
-        From here on, when a machine asks for access, you will see it here. You tap approve or
-        refuse. That is the whole ceremony.
+        You will get a token. Give it to any AI you trust. When they come
+        to Curatom with it, you will see their knock and decide.
       </Text>
       {error ? <Text style={s.error}>{error}</Text> : null}
       <Pressable onPress={begin} style={[s.btn, busy && s.btnDim]} disabled={busy}>

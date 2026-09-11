@@ -1,12 +1,14 @@
 //! Shared types. No I/O, no Cloudflare, no time.
 
-pub mod enrollment;
-pub use enrollment::{OrganicMeView, OwnerRecord};
+pub mod access;
+pub use access::{
+    Knock, KnockStatus, OrganicMeView, OrganicToken, OwnerRecord, KNOCK_TTL_SECS,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
     Read,
@@ -151,6 +153,10 @@ pub struct KernelState {
     pub owner_id: String,
     #[serde(default)]
     pub owner: Option<OwnerRecord>,
+    #[serde(default)]
+    pub tokens: HashMap<String, OrganicToken>,
+    #[serde(default)]
+    pub knocks: HashMap<String, Knock>,
     pub intents: HashMap<String, Intent>,
     pub approvals: HashMap<String, Approval>,
     pub grants: HashMap<String, CapabilitySecret>,
