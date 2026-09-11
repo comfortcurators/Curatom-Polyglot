@@ -20,6 +20,8 @@ apps/mobile/dist
 .dev.vars
 workers/api/build/
 .wrangler/
+workers/orchestrator/node_modules/
+
 
 
 

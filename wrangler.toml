@@ -28,10 +28,9 @@ bucket_name = "curatom-artifacts"
 pattern = "curatom.rajvansh.dev"
 custom_domain = true
 
+[[services]]
+binding = "CURATOM_ORCHESTRATOR"
+service = "curatom-orchestrator"
+
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"
-# Not live anywhere yet. Contract 1 and the kernel work end-to-end; the
-# handoff at /organic/approvals/:id/approve will 502 orchestrator_unreachable
-# until Elixir is deployed somewhere this Worker can reach and this is
-# repointed at it.
-CURATOM_ORCHESTRATOR_URL = "http://localhost:4000/v1/jobs"

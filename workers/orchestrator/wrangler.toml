@@ -1,0 +1,21 @@
+name = "curatom-orchestrator"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[[containers]]
+class_name = "OrchestratorContainer"
+image = "../../orchestrator/Dockerfile"
+instance_type = "basic"
+max_instances = 1
+
+[[durable_objects.bindings]]
+name = "ORCHESTRATOR"
+class_name = "OrchestratorContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OrchestratorContainer"]
+
+[[services]]
+binding = "CURATOM_KERNEL_INTERNAL"
+service = "curatom-kernel"

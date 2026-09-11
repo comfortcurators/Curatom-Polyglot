@@ -54,13 +54,11 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
 #[durable_object]
 pub struct CuratomKernel {
-
     state: State,
+    env: Env,
     kernel: RefCell<Option<K>>,
     owner_id: String,
     hmac_key: Vec<u8>,
-    orchestrator_url: String,
-    // Built in `new()` while `env` is still in hand. The DO never holds `Env`.
     organic_idp: Option<CloudflareAccessIdentityProvider>,
     inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
     bucket: Option<Bucket>,
@@ -80,20 +78,15 @@ impl DurableObject for CuratomKernel {
             .map(|s| hmac_key_bytes(&s.to_string()))
             .unwrap_or_default();
 
-        let orchestrator_url = env
-            .var("CURATOM_ORCHESTRATOR_URL")
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| "/v1/jobs".into());
-
         let organic_idp = CloudflareAccessIdentityProvider::new(&env, owner_id.clone()).ok();
         let bucket = env.bucket("CURATOM_ARTIFACTS").ok();
 
         Self {
             state,
+            env,
             kernel: RefCell::new(None),
             owner_id,
             hmac_key,
-            orchestrator_url,
             organic_idp,
             inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
             bucket,
@@ -268,8 +261,16 @@ impl CuratomKernel {
 
         // Snapshot before borrowing the kernel mutably across awaits.
         let hmac_key = self.hmac_key.clone();
-        let orchestrator_url = self.orchestrator_url.clone();
         let approval_id = approval_id.to_string();
+        let fetcher = match self.env.service("CURATOM_ORCHESTRATOR") {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    502,
+                    json!({ "error": format!("service binding: {e}") }),
+                )
+            }
+        };
 
         let mut k = self.kernel.borrow_mut();
         let k = k.as_mut().unwrap();
@@ -340,10 +341,10 @@ impl CuratomKernel {
             Err(e) => return (500, json!({ "error": e.to_string() })),
         };
 
-        match post_signed(&orchestrator_url, &raw, &hmac_key).await {
-            Ok(code) if code < 400 => (200, json!({ "ok": true, "job_id": job_id })),
-            Ok(code) => (502, json!({ "error": format!("orchestrator_status_{code}") })),
-            Err(e) => (502, json!({ "error": format!("orchestrator_unreachable: {e}") })),
+        match post_signed(&fetcher, &raw, &hmac_key).await {
+            Ok(code) if code < 400 => (200, json!({ "ok": true, "job_handed_off": true })),
+            Ok(code) => (502, json!({ "error": format!("orchestrator status {code}") })),
+            Err(e) => (502, json!({ "error": format!("service binding send: {e}") })),
         }
     }
 
@@ -464,9 +465,10 @@ impl CuratomKernel {
     }
 }
 
-/// Contract 2's one POST. `RequestInit`'s builders return `&mut Self`, and
-/// `worker::Request` has no `send` -- outbound goes through `Fetch`.
-async fn post_signed(url: &str, raw: &str, key: &[u8]) -> Result<u16> {
+/// Contract 2's one POST. Service binding, not a public URL.
+/// `Fetcher::fetch_request` takes `worker::Request` (TryInto<Request>).
+/// Response status is `status_code()`, not `status()`.
+async fn post_signed(fetcher: &Fetcher, raw: &str, key: &[u8]) -> Result<u16> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     headers.set("x-curatom-hmac", &hmac_hex(raw.as_bytes(), key))?;
@@ -476,7 +478,7 @@ async fn post_signed(url: &str, raw: &str, key: &[u8]) -> Result<u16> {
         .with_headers(headers)
         .with_body(Some(wasm_bindgen::JsValue::from_str(raw)));
 
-    let req = Request::new_with_init(url, &init)?;
-    let resp = Fetch::Request(req).send().await?;
+    let req = Request::new_with_init("https://curatom-orchestrator/v1/jobs", &init)?;
+    let resp = fetcher.fetch_request(req).await?;
     Ok(resp.status_code())
 }

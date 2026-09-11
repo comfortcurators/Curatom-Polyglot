@@ -13,6 +13,10 @@ defmodule CuratomOrchestrator.Router do
   plug :verify_hmac
   plug :dispatch
 
+  get "/health" do
+    send_resp(conn, 200, Jason.encode!(%{status: "ok"}))
+  end
+
   post "/v1/jobs" do
     job = CuratomOrchestrator.Job.from_map(conn.body_params)
     :ok = CuratomOrchestrator.JobQueue.submit(job)
@@ -31,17 +35,21 @@ defmodule CuratomOrchestrator.Router do
   end
 
   defp verify_hmac(conn, _opts) do
-    key = System.fetch_env!("CURATOM_HMAC_KEY") |> CuratomOrchestrator.Attestation.key_bytes()
-    provided = get_req_header(conn, "x-curatom-hmac") |> List.first()
-    body = conn.private[:raw_body] || ""
-    expected = :crypto.mac(:hmac, :sha256, key, body) |> Base.encode16(case: :lower)
-
-    if provided && Plug.Crypto.secure_compare(provided, expected) do
+    if conn.method == "GET" and conn.request_path == "/health" do
       conn
     else
-      conn
-      |> Plug.Conn.send_resp(401, Jason.encode!(%{error: "bad hmac"}))
-      |> Plug.Conn.halt()
+      key = System.fetch_env!("CURATOM_HMAC_KEY") |> CuratomOrchestrator.Attestation.key_bytes()
+      provided = get_req_header(conn, "x-curatom-hmac") |> List.first()
+      body = conn.private[:raw_body] || ""
+      expected = :crypto.mac(:hmac, :sha256, key, body) |> Base.encode16(case: :lower)
+
+      if provided && Plug.Crypto.secure_compare(provided, expected) do
+        conn
+      else
+        conn
+        |> Plug.Conn.send_resp(401, Jason.encode!(%{error: "bad hmac"}))
+        |> Plug.Conn.halt()
+      end
     end
   end
 end
