@@ -1,27 +1,33 @@
-import { Container } from "@cloudflare/containers";
+import { Container, ContainerProxy } from "@cloudflare/containers";
 import { env } from "cloudflare:workers";
+
+export { ContainerProxy };
 
 export class OrchestratorContainer extends Container {
   defaultPort = 4000;
   requiredPorts = [4000];
   sleepAfter = "2h";
   enableInternet = false;
+  allowedHosts = ["curatom.kernel"];
   envVars = {
     PORT: "4000",
     CURATOM_WORKER_URL: "http://curatom.kernel",
     CURATOM_HMAC_KEY: env.CURATOM_HMAC_KEY,
   };
-
-  outboundByHost = {
-    "curatom.kernel": async (request, env) => {
-      const url = new URL(request.url);
-      url.protocol = "https:";
-      url.host = "internal";
-      const forwardReq = new Request(url, request);
-      return env.CURATOM_KERNEL_INTERNAL.fetch(forwardReq);
-    },
-  };
 }
+
+// Static. Instance-field outboundByHost is ignored; the SDK stores handlers
+// in outboundByHostRegistry keyed by class name. Without ContainerProxy
+// exported above, intercept never installs and Finch to curatom.kernel dies
+// under enableInternet = false — which is 202 then no outcome.recorded.
+OrchestratorContainer.outboundByHost = {
+  "curatom.kernel": async (request, env) => {
+    const url = new URL(request.url);
+    url.protocol = "https:";
+    url.host = "internal";
+    return env.CURATOM_KERNEL_INTERNAL.fetch(new Request(url, request));
+  },
+};
 
 export default {
   async fetch(request, env, ctx) {
@@ -55,7 +61,8 @@ export default {
           ok: true,
           gateway_version: "ORCH_HANDLER_V2",
           gateway_seen: request.headers.get("x-curatom-probe") ?? "no_probe",
-          container_status: typeof resp !== "undefined" ? resp.status : "no_container_call",
+          container_status:
+            typeof resp !== "undefined" ? resp.status : "no_container_call",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );

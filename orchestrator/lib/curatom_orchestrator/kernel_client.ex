@@ -1,5 +1,6 @@
 defmodule CuratomOrchestrator.KernelClient do
   @moduledoc "HMAC POST back to the Worker. No token, no scope."
+  require Logger
 
   def report_outcome(body_map) do
     body = Jason.encode!(body_map)
@@ -9,5 +10,10 @@ defmodule CuratomOrchestrator.KernelClient do
 
     Finch.build(:post, url, [{"content-type", "application/json"}, {"x-curatom-hmac", sig}], body)
     |> Finch.request(CuratomOrchestrator.Finch)
+    |> tap(fn
+      {:ok, %{status: status}} when status < 400 -> :ok
+      {:ok, %{status: status}} -> Logger.error("outcome callback status=#{status}")
+      {:error, reason} -> Logger.error("outcome callback failed reason=#{inspect(reason)}")
+    end)
   end
 end
