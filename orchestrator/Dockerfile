@@ -10,17 +10,15 @@ ENV MIX_ENV=prod \
 
 # Context is this directory (orchestrator/), not the repo root.
 # wrangler image = "../../orchestrator/Dockerfile" from workers/orchestrator/.
-# Hex, rebar3, and deps are vendored so RUN never hits builds.hex.pm / hex.pm.
+# Vendored deps/ is the resolved tree. Do not run mix deps.get — that is
+# the step that talks to a Hex registry the image does not have.
 COPY mix.exs mix.lock ./
 COPY vendor/hex.ez vendor/rebar3 /app/vendor/
 RUN chmod +x /app/vendor/rebar3 \
     && mix archive.install --force /app/vendor/hex.ez
 
-COPY deps ./deps
-RUN mix deps.get --only prod --offline --check-locked
-
 COPY . ./
-RUN mix deps.compile && mix compile && mix release
+RUN mix compile && mix release
 
 FROM debian:bookworm-slim
 
