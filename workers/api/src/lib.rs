@@ -472,6 +472,7 @@ async fn post_signed(fetcher: &Fetcher, raw: &str, key: &[u8]) -> Result<u16> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     headers.set("x-curatom-hmac", &hmac_hex(raw.as_bytes(), key))?;
+    headers.set("x-curatom-probe", "kernel-handoff-v1")?;
 
     let mut init = RequestInit::new();
     init.with_method(Method::Post)

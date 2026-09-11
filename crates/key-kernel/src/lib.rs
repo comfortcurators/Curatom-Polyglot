@@ -345,11 +345,12 @@ where
         } else {
             format!("Failed: {}", o.error.clone().unwrap_or_else(|| "unknown".into()))
         };
+        let kind = if o.ok { "outcome.recorded" } else { "execution.failed" };
         {
             let st = self.st_mut()?;
             st.outcomes.push(o.clone());
         }
-        self.note("outcome.recorded", summary, Some(o.intent_id.clone()), None);
+        self.note(kind, summary, Some(o.intent_id.clone()), None);
         self.persist().await?;
         Ok(())
     }

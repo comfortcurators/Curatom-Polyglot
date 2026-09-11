@@ -15,6 +15,12 @@ defmodule CuratomOrchestrator.ExecutionWorker do
         case CuratomOrchestrator.Attestation.verify(action.attestation, key) do
           {:error, reason} ->
             Logger.error("bad attestation reason=#{inspect(reason)}")
+            CuratomOrchestrator.KernelClient.report_outcome(%{
+              job_id: job.job_id,
+              intent_id: job.intent_id,
+              ok: false,
+              error: "attestation_rejected"
+            })
             :ok
 
           {:ok, claims} ->

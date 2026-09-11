@@ -23,6 +23,8 @@ export class OrchestratorContainer extends Container {
 
 export default {
   async fetch(request, env, ctx) {
+    console.log("ORCH_FETCH_ENTERED", Date.now(), request.method, request.url);
+    console.log("ORCH_PROBE", request.headers.get("x-curatom-probe"));
     const url = new URL(request.url);
     if (url.pathname === "/v1/jobs" && request.method === "POST") {
       const container = env.ORCHESTRATOR.get(
