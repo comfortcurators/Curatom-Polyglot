@@ -589,17 +589,22 @@ impl CuratomKernel {
             Err(e) => return (502, json!({ "error": format!("service binding: {e}") })),
         };
 
-        let mut k = self.kernel.borrow_mut();
-        let Some(k) = k.as_mut() else {
-            return (503, json!({ "error": "kernel_not_ready" }));
-        };
-        if let Err(e) = k.decide_knock(&knock_id, KnockStatus::Approved).await {
-            return (409, json!({ "error": e }));
-        }
-        let knock = match k.get_knock(&knock_id) {
-            Ok(Some(x)) => x,
-            Ok(None) => return (404, json!({ "error": "unknown_knock" })),
-            Err(e) => return (500, json!({ "error": e })),
+        // Decide, then DROP the RefCell. Valhalla /provision calls back into
+        // this same DO (/organic/keys/verify, /internal/freeze). Holding
+        // borrow_mut across that await panics the isolate.
+        let knock = {
+            let mut k = self.kernel.borrow_mut();
+            let Some(k) = k.as_mut() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            if let Err(e) = k.decide_knock(&knock_id, KnockStatus::Approved).await {
+                return (409, json!({ "error": e }));
+            }
+            match k.get_knock(&knock_id) {
+                Ok(Some(x)) => x,
+                Ok(None) => return (404, json!({ "error": "unknown_knock" })),
+                Err(e) => return (500, json!({ "error": e })),
+            }
         };
 
         let wants_valhalla = knock.resources.iter().any(|r| r.starts_with("valhalla."));
@@ -647,57 +652,75 @@ impl CuratomKernel {
             }
         }
 
-        let issued = match k.issue_knock_grant(&knock).await {
-            Ok(Some(i)) => i,
-            Ok(None) => return (500, json!({ "error": "grant issuance failed" })),
-            Err(e) => return (500, json!({ "error": e })),
-        };
-        let secret = issued.handle.secret;
-
-        let now = CloudflareClock.now_unix();
-        let job_id = curatom_crypto::random_id("job");
-        let mut claims = Vec::new();
-        for resource in &secret.resources {
-            for op in &secret.permissions {
-                claims.push(AttestationClaims {
-                    v: 1,
-                    job_id: job_id.clone(),
-                    grant_id: secret.grant_id.clone(),
-                    requester_id: secret.requester_id.clone(),
-                    resource: resource.clone(),
-                    operation: op.as_str().to_string(),
-                    issued_unix: now,
-                    expires_unix: now + ATTESTATION_TTL_SECONDS,
-                    nonce: curatom_crypto::random_id("nonce"),
-                });
-            }
-        }
-        if claims.is_empty() {
-            return (400, json!({ "error": "no_actions_authorized" }));
-        }
-        let mut actions = Vec::with_capacity(claims.len());
-        for c in &claims {
-            let op = Permission::parse(&c.operation);
-            if let Err(e) = k
-                .consume_capability(&secret.token, &secret.requester_id, &c.resource, op)
-                .await
-            {
-                return (500, json!({ "error": e }));
-            }
-            match curatom_attestation::sign(c, &hmac_key) {
-                Ok(token) => actions.push(json!({
-                    "resource": c.resource,
-                    "operation": c.operation,
-                    "attestation": token,
-                })),
+        let (job_id, secret_intent, secret_requester, actions) = {
+            let mut k = self.kernel.borrow_mut();
+            let Some(k) = k.as_mut() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            let knock = match k.get_knock(&knock_id) {
+                Ok(Some(x)) if x.status == KnockStatus::Approved => x,
+                Ok(Some(_)) => return (409, json!({ "error": "knock_not_approved" })),
+                Ok(None) => return (404, json!({ "error": "unknown_knock" })),
                 Err(e) => return (500, json!({ "error": e })),
+            };
+            let issued = match k.issue_knock_grant(&knock).await {
+                Ok(Some(i)) => i,
+                Ok(None) => return (500, json!({ "error": "grant issuance failed" })),
+                Err(e) => return (500, json!({ "error": e })),
+            };
+            let secret = issued.handle.secret;
+            let now = CloudflareClock.now_unix();
+            let job_id = curatom_crypto::random_id("job");
+            let mut claims = Vec::new();
+            for resource in &secret.resources {
+                for op in &secret.permissions {
+                    claims.push(AttestationClaims {
+                        v: 1,
+                        job_id: job_id.clone(),
+                        grant_id: secret.grant_id.clone(),
+                        requester_id: secret.requester_id.clone(),
+                        resource: resource.clone(),
+                        operation: op.as_str().to_string(),
+                        issued_unix: now,
+                        expires_unix: now + ATTESTATION_TTL_SECONDS,
+                        nonce: curatom_crypto::random_id("nonce"),
+                    });
+                }
             }
-        }
+            if claims.is_empty() {
+                return (400, json!({ "error": "no_actions_authorized" }));
+            }
+            let mut actions = Vec::with_capacity(claims.len());
+            for c in &claims {
+                let op = Permission::parse(&c.operation);
+                if let Err(e) = k
+                    .consume_capability(&secret.token, &secret.requester_id, &c.resource, op)
+                    .await
+                {
+                    return (500, json!({ "error": e }));
+                }
+                match curatom_attestation::sign(c, &hmac_key) {
+                    Ok(token) => actions.push(json!({
+                        "resource": c.resource,
+                        "operation": c.operation,
+                        "attestation": token,
+                    })),
+                    Err(e) => return (500, json!({ "error": e })),
+                }
+            }
+            (
+                job_id,
+                secret.intent_id,
+                secret.requester_id,
+                actions,
+            )
+        };
+
         let envelope = json!({
             "job_id": job_id,
             "knock_id": knock_id,
-            "intent_id": secret.intent_id,
-            "requester_id": secret.requester_id,
+            "intent_id": secret_intent,
+            "requester_id": secret_requester,
             "valhalla_sandbox_id": valhalla_sandbox_id,
             "actions": actions,
         });
