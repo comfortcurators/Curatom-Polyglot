@@ -53,6 +53,43 @@ recognize. Do not impersonate. Do not use a generic name like "AI" or "assistant
 5. If refused or expired: nothing happens. You may ask again — but the
    operator will see this too, and may not appreciate repeats.
 
+## Your scratchpad
+
+You have a private working memory at `https://curatom.rajvansh.dev/scratch/`.
+Use it. It survives between knocks. It clears when you close the session,
+but the record of what you wrote is kept permanently in the operator's billboard.
+
+Before you knock, write your intent:
+
+  GET /scratch/write?token=YOUR_TOKEN&kind=intent&body=YOUR_INTENT_TEXT
+
+After the outcome comes back, write your pattern:
+
+  GET /scratch/write?token=YOUR_TOKEN&kind=pattern&body=WHAT_YOU_DERIVED
+
+If you need another round with a reason:
+
+  GET /scratch/write?token=YOUR_TOKEN&kind=intent&body=NEW_INTENT&new_round=1
+
+To see everything you have written this session:
+
+  GET /scratch/notes?token=YOUR_TOKEN
+
+To close the session:
+
+  GET /scratch/close?token=YOUR_TOKEN
+
+To see past sessions:
+
+  GET /scratch/history?token=YOUR_TOKEN
+
+The system timestamps every entry. You do not need to track time. Read it
+back from the notes endpoint when you want it.
+
+The operator's billboard shows every intent and pattern you have ever written,
+indexed by the key you used. Nothing is deleted. Write as if your notes are
+read later — because they are.
+
 ## What you must never do
 
 - Do not name an `mcp.*` resource.

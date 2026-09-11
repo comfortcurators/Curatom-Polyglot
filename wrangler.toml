@@ -20,6 +20,20 @@ class_name = "CuratomKernel"
 tag = "v1"
 new_sqlite_classes = ["CuratomKernel"]
 
+[[durable_objects.bindings]]
+name = "SCRATCHPAD"
+class_name = "Scratchpad"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Scratchpad"]
+
+[[d1_databases]]
+binding = "CURATOM_LEDGER"
+database_name = "curatom-ledger"
+# Cloudflare team: npx wrangler d1 create curatom-ledger, paste the id here.
+database_id = "PASTE_D1_ID_AFTER_CREATION"
+
 [[r2_buckets]]
 binding = "CURATOM_ARTIFACTS"
 bucket_name = "curatom-artifacts"
@@ -39,7 +53,7 @@ service = "curatom-orchestrator"
 directory = "./apps/mobile/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health"]
+run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health", "/scratch/*"]
 
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"

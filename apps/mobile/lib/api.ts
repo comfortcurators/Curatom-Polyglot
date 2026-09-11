@@ -146,3 +146,37 @@ export async function keyLog(token: string): Promise<KeyLogEntry[]> {
   if (status !== 200) throw new Error(`keyLog: ${status} ${JSON.stringify(body)}`);
   return body as KeyLogEntry[];
 }
+
+export type BillboardEntry = {
+  id: string;
+  key_hash: string;
+  key_label: string;
+  session_id: string;
+  round: number;
+  kind: string;
+  body_ref: string;
+  knock_id: string;
+  created_at: string;
+  seq: number;
+};
+
+export async function billboard(params?: {
+  key_hash?: string;
+  kind?: string;
+  limit?: number;
+}): Promise<BillboardEntry[]> {
+  const q = new URLSearchParams();
+  if (params?.key_hash) q.set("key_hash", params.key_hash);
+  if (params?.kind) q.set("kind", params.kind);
+  if (params?.limit) q.set("limit", String(params.limit));
+  const suffix = q.toString() ? `?${q.toString()}` : "";
+  const { status, body } = await jget(`/organic/billboard${suffix}`);
+  if (status !== 200) throw new Error(`billboard: ${status} ${JSON.stringify(body)}`);
+  return (body as { entries: BillboardEntry[] }).entries ?? [];
+}
+
+export async function billboardBlob(ref: string): Promise<string> {
+  const { status, body } = await jget(`/organic/billboard/blob?ref=${encodeURIComponent(ref)}`);
+  if (status !== 200) throw new Error(`blob: ${status} ${JSON.stringify(body)}`);
+  return (body as { body: string }).body ?? "";
+}

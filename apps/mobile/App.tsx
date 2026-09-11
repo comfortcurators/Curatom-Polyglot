@@ -9,7 +9,7 @@ import * as api from "./lib/api";
 import EnrollmentScreen from "./screens/EnrollmentScreen";
 import TurnstileGate from "./components/TurnstileGate";
 
-type Tab = "keys" | "knocks" | "activity";
+type Tab = "keys" | "knocks" | "billboard" | "activity";
 
 export default function App() {
   const [me, setMe] = useState<api.Me | null>(null);
@@ -51,7 +51,7 @@ function Dashboard() {
     <SafeAreaView style={s.root}>
       <StatusBar style="light" />
       <View style={s.tabBar}>
-        {(["keys", "knocks", "activity"] as Tab[]).map((t) => (
+        {(["keys", "knocks", "billboard", "activity"] as Tab[]).map((t) => (
           <Pressable key={t} onPress={() => setTab(t)} style={[s.tab, tab === t && s.tabActive]}>
             <Text style={[s.tabText, tab === t && s.tabTextActive]}>{t.toUpperCase()}</Text>
           </Pressable>
@@ -59,6 +59,7 @@ function Dashboard() {
       </View>
       {tab === "keys" && <KeysTab />}
       {tab === "knocks" && <KnocksTab />}
+      {tab === "billboard" && <BillboardTab />}
       {tab === "activity" && <ActivityTab />}
     </SafeAreaView>
   );
@@ -314,6 +315,84 @@ function KnocksTab() {
   );
 }
 
+function BillboardTab() {
+  const [entries, setEntries] = useState<api.BillboardEntry[]>([]);
+  const [filter, setFilter] = useState<"all" | "intent" | "pattern">("all");
+  const [busy, setBusy] = useState(false);
+  const [detail, setDetail] = useState<{ ref: string; body: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setBusy(true);
+    try {
+      const list = await api.billboard({
+        kind: filter === "all" ? undefined : filter,
+        limit: 200,
+      });
+      setEntries(list);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  }, [filter]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  async function openBody(ref: string) {
+    try {
+      const body = await api.billboardBlob(ref);
+      setDetail({ ref, body });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  return (
+    <ScrollView contentContainerStyle={s.pad}
+      refreshControl={<RefreshControl refreshing={busy} onRefresh={refresh} />}>
+      <View style={s.row}>
+        {(["all", "intent", "pattern"] as const).map((f) => (
+          <Pressable key={f} onPress={() => setFilter(f)}
+            style={[s.chip, filter === f && s.chipOn]}>
+            <Text style={[s.chipText, filter === f && s.chipTextOn]}>{f.toUpperCase()}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {error ? <Text style={s.err}>{error}</Text> : null}
+      {entries.length === 0 && !busy && <Text style={s.dim}>No entries yet.</Text>}
+
+      {entries.map((e) => (
+        <Pressable key={e.id} onPress={() => openBody(e.body_ref)} style={s.card}>
+          <View style={s.rowTop}>
+            <Text style={s.cardTitle}>{e.kind.toUpperCase()} · {e.key_label || e.key_hash.slice(0, 10)}</Text>
+            <Text style={s.dim}>r{e.round}</Text>
+          </View>
+          <Text style={s.dim}>{e.created_at}</Text>
+          {e.knock_id ? <Text style={s.dim}>knock {e.knock_id.slice(0, 14)}…</Text> : null}
+        </Pressable>
+      ))}
+
+      <Modal visible={detail !== null} transparent animationType="fade"
+        onRequestClose={() => setDetail(null)}>
+        <View style={s.modalBackdrop}>
+          <ScrollView contentContainerStyle={s.modalCard}>
+            <Text style={s.modalH}>Body</Text>
+            <Text style={s.dim}>{detail?.ref}</Text>
+            <View style={s.codeBox}>
+              <Text style={s.code}>{detail?.body}</Text>
+            </View>
+            <Pressable onPress={() => setDetail(null)} style={s.btn}>
+              <Text style={s.btnText}>CLOSE</Text>
+            </Pressable>
+          </ScrollView>
+        </View>
+      </Modal>
+    </ScrollView>
+  );
+}
+
 function ActivityTab() {
   const [events, setEvents] = useState<{ kind: string; at: string; actor: string }[]>([]);
   const refresh = useCallback(async () => {
@@ -368,4 +447,8 @@ const s = StyleSheet.create({
   input: { color: "#fff", borderWidth: 1, borderColor: "#333", borderRadius: 10, padding: 12, marginTop: 8 },
   logRow: { borderTopWidth: 1, borderTopColor: "#222", paddingVertical: 8, gap: 2 },
   logKind: { color: "#fff", fontWeight: "600" },
+  chip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: "#333" },
+  chipOn: { backgroundColor: "#eee", borderColor: "#eee" },
+  chipText: { color: "#666", fontSize: 12, fontWeight: "600" },
+  chipTextOn: { color: "#000" },
 });

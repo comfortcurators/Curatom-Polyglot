@@ -35,6 +35,9 @@ use curatom_ports::Clock;
 
 use serde_json::{json, Value};
 
+mod scratchpad;
+pub use scratchpad::Scratchpad;
+
 const LLM_GUIDE: &str = include_str!("../../../docs/llm-guide.md");
 
 type K = Kernel<DOStateStore, DOEventLedger, R2ArtifactStore, CloudflareClock>;
@@ -123,6 +126,10 @@ impl DurableObject for CuratomKernel {
 
         self.ensure().await?;
 
+        if path.starts_with("/scratch/") {
+            return self.route_scratch(&hr).await;
+        }
+
         // Image knock endpoint. Returns a binary GIF, not JSON.
         // Must be handled before the JSON match block below.
         if method == "GET" && path == "/inorganic/knock" {
@@ -166,6 +173,10 @@ impl DurableObject for CuratomKernel {
                 self.h_refuse_knock(&hr, &id).await
             }
             ("GET", "/organic/activity") => self.h_activity(&hr).await,
+            ("GET", "/organic/billboard") => self.h_billboard(&hr).await,
+            ("GET", p) if p.starts_with("/organic/billboard/blob") => {
+                self.h_billboard_blob(&hr).await
+            }
             ("POST", "/inorganic/handoff") => self.h_inorganic_handoff(&hr).await,
             ("POST", "/inorganic/submit") => self.h_inorganic_submit(&hr).await,
             ("POST", "/internal/outcome") => self.h_internal_outcome(&hr).await,
@@ -220,6 +231,45 @@ impl CuratomKernel {
             Ok(None) => Err((401, json!({ "error": "unauthenticated" }))),
             Err(e) => Err((500, json!({ "error": e }))),
         }
+    }
+
+    async fn route_scratch(&self, hr: &HttpRequestDto) -> Result<Response> {
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return json_response(400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned().replace('+', " ")))
+            .collect();
+        let token = match params.get("token") {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => return json_response(400, json!({ "error": "missing_token" })),
+        };
+        let k = self.kernel.borrow();
+        let valid = k.as_ref().map(|k| k.token_matches(&token)).unwrap_or(false);
+        if !valid {
+            return json_response(401, json!({ "error": "token_not_recognized" }));
+        }
+        let key_hash = curatom_crypto::sha256_hex(token.as_bytes());
+        let label = k
+            .as_ref()
+            .and_then(|k| k.get_key(&token).map(|t| t.label))
+            .unwrap_or_default();
+        drop(k);
+
+        let ns = self.env.durable_object("SCRATCHPAD")?;
+        let id = ns.id_from_name(&key_hash)?;
+        let stub = id.get_stub()?;
+        let forwarded_url = if hr.url.contains('?') {
+            format!("{}&label={}", hr.url, urlencoding::encode(&label))
+        } else {
+            format!("{}?label={}", hr.url, urlencoding::encode(&label))
+        };
+        let mut init = RequestInit::new();
+        init.with_method(Method::Get);
+        let req = Request::new_with_init(&forwarded_url, &init)?;
+        stub.fetch_with_request(req).await
     }
 
     // ---- organic ----
@@ -749,6 +799,96 @@ impl CuratomKernel {
                 (200, Value::Array(out))
             }
             Err(e) => (500, json!({ "error": e })),
+        }
+    }
+
+    async fn h_billboard(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let key_hash = params.get("key_hash").cloned().unwrap_or_default();
+        let kind_filter = params.get("kind").cloned().unwrap_or_default();
+        let limit: i64 = params
+            .get("limit")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200)
+            .clamp(1, 1000);
+
+        let db = match self.env.d1("CURATOM_LEDGER") {
+            Ok(d) => d,
+            Err(e) => return (500, json!({ "error": format!("d1: {e}") })),
+        };
+
+        let mut sql = String::from(
+            "SELECT id, key_hash, key_label, session_id, round, kind, \
+             body_ref, knock_id, created_at, seq FROM ledger WHERE 1=1",
+        );
+        let mut binds: Vec<wasm_bindgen::JsValue> = Vec::new();
+        if !key_hash.is_empty() {
+            sql.push_str(" AND key_hash = ?");
+            binds.push(wasm_bindgen::JsValue::from_str(&key_hash));
+        }
+        if !kind_filter.is_empty() {
+            sql.push_str(" AND kind = ?");
+            binds.push(wasm_bindgen::JsValue::from_str(&kind_filter));
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+        binds.push(wasm_bindgen::JsValue::from_f64(limit as f64));
+
+        let stmt = db.prepare(&sql);
+        let bound = match stmt.bind(&binds) {
+            Ok(b) => b,
+            Err(e) => return (500, json!({ "error": format!("bind: {e}") })),
+        };
+        match bound.all().await {
+            Ok(r) => {
+                let rows: Vec<Value> = r.results::<Value>().unwrap_or_default();
+                (200, json!({ "entries": rows }))
+            }
+            Err(e) => (500, json!({ "error": format!("query: {e}") })),
+        }
+    }
+
+    async fn h_billboard_blob(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(ref_str) = params.get("ref") else {
+            return (400, json!({ "error": "missing_ref" }));
+        };
+        if ref_str.len() > 512 || ref_str.contains("..") {
+            return (400, json!({ "error": "bad_ref" }));
+        }
+        let bucket = match self.env.bucket("CURATOM_ARTIFACTS") {
+            Ok(b) => b,
+            Err(e) => return (500, json!({ "error": format!("bucket: {e}") })),
+        };
+        match bucket.get(ref_str).execute().await {
+            Ok(Some(obj)) => match obj.body() {
+                Some(body) => match body.text().await {
+                    Ok(text) => (200, json!({ "ref": ref_str, "body": text })),
+                    Err(e) => (500, json!({ "error": format!("read: {e}") })),
+                },
+                None => (404, json!({ "error": "empty_body" })),
+            },
+            Ok(None) => (404, json!({ "error": "not_found" })),
+            Err(e) => (500, json!({ "error": format!("get: {e}") })),
         }
     }
 
