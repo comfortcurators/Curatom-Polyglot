@@ -18,6 +18,7 @@ on `Kernel` in crates/key-kernel/src/lib.rs.
 use worker::*;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use curatom_attestation::{hmac_hex, hmac_key_bytes, AttestationClaims};
 use curatom_key_kernel::Kernel;
@@ -96,8 +97,15 @@ impl DurableObject for CuratomKernel {
         self.ensure().await?;
 
         let hr = to_dto(req).await?;
-        let path = Url::parse(&hr.url)?.path().to_string();
+        let parsed = Url::parse(&hr.url)?;
+        let path = parsed.path().to_string();
         let method = hr.method.to_ascii_uppercase();
+
+        // Image knock endpoint. Returns a binary GIF, not JSON.
+        // Must be handled before the JSON match block below.
+        if method == "GET" && path == "/inorganic/knock" {
+            return self.h_inorganic_knock_image(&hr).await;
+        }
 
         let (status, body) = match (method.as_str(), path.as_str()) {
             ("GET", "/organic/me") => self.h_me(&hr).await,
@@ -636,6 +644,73 @@ impl CuratomKernel {
         (200, curatom_inorganic_router::handoff_form(token))
     }
 
+    /// Chat platforms fetch this as an image. Always a 1x1 GIF.
+    /// A knock is a side effect; failures never leak to the fetcher.
+    async fn h_inorganic_knock_image(&self, hr: &HttpRequestDto) -> Result<Response> {
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return gif_pixel(),
+        };
+
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned().replace('+', " ")))
+            .collect();
+
+        let Some(token) = params.get("token").cloned() else {
+            return gif_pixel();
+        };
+        let Some(name) = params.get("name").cloned() else {
+            return gif_pixel();
+        };
+        let Some(reason) = params.get("reason").cloned() else {
+            return gif_pixel();
+        };
+        let Some(resources_str) = params.get("resources").cloned() else {
+            return gif_pixel();
+        };
+        let Some(permissions_str) = params.get("permissions").cloned() else {
+            return gif_pixel();
+        };
+
+        let resources: Vec<String> = resources_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if resources.is_empty() {
+            return gif_pixel();
+        }
+
+        let mut permissions: Vec<Permission> = Vec::new();
+        for p in permissions_str.split(',') {
+            match p.trim() {
+                "read" => permissions.push(Permission::Read),
+                "write" => permissions.push(Permission::Write),
+                _ => return gif_pixel(),
+            }
+        }
+        if permissions.is_empty() {
+            return gif_pixel();
+        }
+
+        let mut k = self.kernel.borrow_mut();
+        if let Some(k) = k.as_mut() {
+            let _ = k
+                .create_knock(
+                    token,
+                    name,
+                    reason,
+                    resources,
+                    permissions,
+                    CuratomDuration::SingleUse,
+                )
+                .await;
+        }
+
+        gif_pixel()
+    }
+
     async fn h_inorganic_submit(&self, hr: &HttpRequestDto) -> Reply {
         let parsed = match curatom_inorganic_router::parse_submit(&hr.body) {
             Ok(p) => p,
@@ -819,4 +894,28 @@ async fn verify_turnstile(
         .get("success")
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
+}
+
+/// 1x1 transparent GIF, 43 bytes. Returned by the image knock endpoint
+/// so chat platforms can render it silently and fire the knock on fetch.
+fn gif_pixel() -> Result<Response> {
+    let bytes: Vec<u8> = vec![
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61,                         // GIF89a
+        0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00,                   // logical screen descriptor
+        0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF,                         // global color table
+        0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00,             // graphic control extension
+        0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, // image descriptor
+        0x02, 0x02, 0x44, 0x01, 0x00,                               // image data
+        0x3B,                                                       // trailer
+    ];
+
+    let headers = Headers::new();
+    let _ = headers.set("content-type", "image/gif");
+    let _ = headers.set(
+        "cache-control",
+        "no-store, no-cache, must-revalidate, max-age=0",
+    );
+    let _ = headers.set("access-control-allow-origin", "*");
+
+    Response::from_bytes(bytes).map(|r| r.with_headers(headers).with_status(200))
 }
