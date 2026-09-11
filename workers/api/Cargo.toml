@@ -2,28 +2,27 @@
 name = "curatom-worker"
 version = "0.1.0"
 edition = "2021"
-license = "AGPL-3.0-only"
-publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
+worker = "0.5"
+worker-macros = "0.5"
 console_error_panic_hook = "0.1"
-curatom-attestation = { path = "../../crates/attestation" }
-curatom-crypto = { path = "../../crates/crypto" }
-curatom-inorganic-router = { path = "../../crates/inorganic-router" }
-curatom-key-kernel = { path = "../../crates/key-kernel" }
-curatom-organic-router = { path = "../../crates/organic-router" }
-curatom-protocol = { path = "../../crates/protocol" }
-curatom-sign = { path = "../../crates/sign" }
-curatom-substrate-cloudflare = { path = "../../crates/substrate-cloudflare" }
-hex = "0.4"
-hmac = "0.12"
-js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
-url = "2"
 wasm-bindgen = "0.2"
-worker = "0.5"
+js-sys = "0.3"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+curatom-protocol = { path = "../../crates/protocol" }
+curatom-crypto = { path = "../../crates/crypto" }
+curatom-ports = { path = "../../crates/ports" }
+curatom-key-kernel = { path = "../../crates/key-kernel" }
+curatom-sign = { path = "../../crates/sign" }
+curatom-attestation = { path = "../../crates/attestation" }
+curatom-substrate-cloudflare = { path = "../../crates/substrate-cloudflare" }

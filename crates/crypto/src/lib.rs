@@ -3,9 +3,7 @@
 use sha2::{Digest, Sha256};
 
 pub fn random_id(prefix: &str) -> String {
-    let mut buf = [0u8; 16];
-    getrandom::getrandom(&mut buf).expect("entropy");
-    format!("{prefix}_{}", hex::encode(buf))
+    format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
