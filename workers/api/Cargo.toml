@@ -27,5 +27,4 @@ curatom-sign = { path = "../../crates/sign" }
 curatom-organic-router = { path = "../../crates/organic-router" }
 curatom-inorganic-router = { path = "../../crates/inorganic-router" }
 curatom-attestation = { path = "../../crates/attestation" }
-curatom-enrollment = { path = "../../crates/enrollment" }
 curatom-substrate-cloudflare = { path = "../../crates/substrate-cloudflare" }

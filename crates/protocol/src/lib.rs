@@ -1,7 +1,7 @@
 //! Shared types. No I/O, no Cloudflare, no time.
 
 pub mod enrollment;
-pub use enrollment::{EnrollmentSession, OrganicMeView, OwnerRecord};
+pub use enrollment::{OrganicMeView, OwnerRecord};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -93,9 +93,6 @@ pub enum ApprovalDecision {
 pub enum ArtifactKind {
     Organic,
     Inorganic,
-    Signature1,
-    Signature2,
-    ApprovalSignature,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,10 +106,6 @@ pub struct Approval {
     pub duration: Duration,
     pub digest: String,
     pub status: ApprovalStatus,
-    #[serde(default)]
-    pub decision_signature_digest: Option<String>,
-    #[serde(default)]
-    pub decision_signature_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

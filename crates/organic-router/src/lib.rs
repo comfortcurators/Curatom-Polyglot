@@ -67,8 +67,6 @@ mod tests {
             duration: Duration::SingleUse,
             digest: "abc".into(),
             status: ApprovalStatus::Pending,
-            decision_signature_digest: None,
-            decision_signature_ref: None,
         };
         let v = serde_json::to_value(approval_view(&a)).unwrap();
         leak_check(&v).unwrap();

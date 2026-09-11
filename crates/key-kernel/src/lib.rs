@@ -120,8 +120,6 @@ where
             duration: Duration::SingleUse,
             digest: request_digest("fleet.curatom", &intent.resources, text),
             status: ApprovalStatus::Pending,
-            decision_signature_digest: None,
-            decision_signature_ref: None,
         };
         let iid = intent.id.clone();
         let aid = approval.id.clone();
@@ -161,8 +159,6 @@ where
             duration: req.duration.clone(),
             digest: request_digest(&req.requester_id, &req.resources, &req.reason),
             status: ApprovalStatus::Pending,
-            decision_signature_digest: None,
-            decision_signature_ref: None,
         };
         let iid = intent.id.clone();
         let aid = approval.id.clone();
@@ -256,56 +252,6 @@ where
                 }
             }
             a.status = status;
-        }
-        let a = self.get_approval(approval_id)?.unwrap();
-        let kind = match decision {
-            ApprovalDecision::Approve => "approval.approved",
-            ApprovalDecision::Refuse => "approval.refused",
-        };
-        let summary = match decision {
-            ApprovalDecision::Approve => "Approved.".to_string(),
-            ApprovalDecision::Refuse => "Refused.".to_string(),
-        };
-        self.note(kind, summary, Some(a.intent_id.clone()), Some(a.id.clone()));
-        self.persist().await?;
-        Ok(Some(a))
-    }
-
-    /// Approve/refuse with a fresh SIGN2 capture. Approvals require a digest.
-    pub async fn decide_approval_with_signature(
-        &mut self,
-        approval_id: &str,
-        decision: ApprovalDecision,
-        signature_digest: Option<String>,
-        signature_ref: Option<String>,
-    ) -> Result<Option<Approval>, String> {
-        if self.st()?.owner.is_none() {
-            return Err("owner_not_enrolled".into());
-        }
-        if matches!(decision, ApprovalDecision::Approve) && signature_digest.is_none() {
-            return Err("signature_required".into());
-        }
-        let status = match decision {
-            ApprovalDecision::Approve => ApprovalStatus::Approved,
-            ApprovalDecision::Refuse => ApprovalStatus::Refused,
-        };
-        {
-            let st = self.st_mut()?;
-            let Some(a) = st.approvals.get_mut(approval_id) else {
-                return Ok(None);
-            };
-            if a.status != ApprovalStatus::Pending {
-                return Ok(None);
-            }
-            if decision == ApprovalDecision::Approve {
-                let expected = request_digest(&a.requester, &a.resources, &a.reason);
-                if expected != a.digest {
-                    return Err("digest_mismatch".into());
-                }
-            }
-            a.status = status;
-            a.decision_signature_digest = signature_digest;
-            a.decision_signature_ref = signature_ref;
         }
         let a = self.get_approval(approval_id)?.unwrap();
         let kind = match decision {

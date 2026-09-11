@@ -5,7 +5,6 @@ members = [
     "crates/crypto",
     "crates/ports",
     "crates/key-kernel",
-    "crates/enrollment",
     "crates/resource-registry",
     "crates/sign",
     "crates/attestation",

@@ -37,28 +37,10 @@ export async function me(): Promise<Me> {
   return body as Me;
 }
 
-export async function enrollStart(): Promise<{ session_id: string; expires_at: string }> {
-  const { status, body } = await jpost("/organic/enroll/start", {});
-  if (status !== 201) throw new Error(`enroll/start: ${status} ${JSON.stringify(body)}`);
-  return body;
-}
-
-export async function enrollSign1(session_id: string, image_b64: string) {
-  const { status, body } = await jpost("/organic/enroll/sign1", { session_id, image_b64 });
-  if (status !== 200) throw new Error(`enroll/sign1: ${status} ${JSON.stringify(body)}`);
-  return body as { digest: string; ref: string; complete: boolean };
-}
-
-export async function enrollSign2(session_id: string, image_b64: string) {
-  const { status, body } = await jpost("/organic/enroll/sign2", { session_id, image_b64 });
-  if (status !== 200) throw new Error(`enroll/sign2: ${status} ${JSON.stringify(body)}`);
-  return body as { digest: string; ref: string; complete: boolean };
-}
-
-export async function enrollComplete(session_id: string, display_name?: string) {
-  const { status, body } = await jpost("/organic/enroll/complete", { session_id, display_name });
-  if (status !== 201) throw new Error(`enroll/complete: ${status} ${JSON.stringify(body)}`);
-  return body as { owner_id: string; enrolled_at: string };
+export async function claim(displayName?: string) {
+  const { status, body } = await jpost("/organic/claim", { display_name: displayName });
+  if (status !== 201) throw new Error(`claim: ${status} ${JSON.stringify(body)}`);
+  return body as { owner_id: string; display_name: string; claimed_at: string };
 }
 
 export async function createIntent(text: string) {
@@ -70,11 +52,18 @@ export async function createIntent(text: string) {
 export async function listApprovals() {
   const { status, body } = await jget("/organic/approvals");
   if (status !== 200) throw new Error(`approvals: ${status}`);
-  return body;
+  return body as Array<{
+    id: string;
+    requester: string;
+    reason: string;
+    resources: string[];
+    permissions: string[];
+    duration: string;
+  }>;
 }
 
-export async function approve(approvalId: string, image_b64: string) {
-  const { status, body } = await jpost(`/organic/approvals/${approvalId}/approve`, { image_b64 });
+export async function approve(approvalId: string) {
+  const { status, body } = await jpost(`/organic/approvals/${approvalId}/approve`, {});
   if (status !== 200) throw new Error(`approve: ${status} ${JSON.stringify(body)}`);
   return body;
 }
