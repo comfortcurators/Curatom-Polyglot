@@ -115,6 +115,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "curatom-inorganic-router"
+version = "0.1.0"
+dependencies = [
+ "curatom-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "curatom-key-kernel"
 version = "0.1.0"
 dependencies = [
@@ -123,6 +131,15 @@ dependencies = [
  "curatom-ports",
  "curatom-protocol",
  "curatom-resource-registry",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curatom-organic-router"
+version = "0.1.0"
+dependencies = [
+ "curatom-protocol",
  "serde",
  "serde_json",
 ]
@@ -176,7 +193,9 @@ dependencies = [
  "console_error_panic_hook",
  "curatom-attestation",
  "curatom-crypto",
+ "curatom-inorganic-router",
  "curatom-key-kernel",
+ "curatom-organic-router",
  "curatom-ports",
  "curatom-protocol",
  "curatom-sign",

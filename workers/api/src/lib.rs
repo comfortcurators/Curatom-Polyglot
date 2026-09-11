@@ -1,23 +1,47 @@
+/*
+Intent : Carry Contract 1 and Contract 2 over the kernel, adding no authority of its own.
+Pattern: cargo check --target wasm32-unknown-unknown. Every kernel call here is on Kernel today.
+Signed. Claude / 2026-09-11 UTC
+
+This file is the integration layer and nothing else. It authenticates, it
+translates HTTP into kernel calls, it renders organic views, and it hands a
+spent grant's attestation to Elixir. Every rule it appears to enforce is
+enforced in `curatom-key-kernel`; if a rule looks like it lives here, that is
+a bug.
+
+The previous version of this file was written against a kernel that existed
+only in a conversation -- `StateError`, `RequestRecord`, `human_label`,
+`list_events`. It did not compile. Nothing below calls a method that is not
+on `Kernel` in crates/key-kernel/src/lib.rs.
+*/
+
 use worker::*;
+
+use curatom_attestation::{hmac_hex, hmac_key_bytes, AttestationClaims};
+use curatom_key_kernel::Kernel;
+use curatom_organic_router::{activity_view, approval_view, intent_view, me_view};
 use curatom_protocol::{
-    Approval, Duration, Intent, Outcome, Permission, StateError,
+    ApprovalDecision, Duration as CuratomDuration, HttpRequestDto, InorganicRequest, Outcome,
+    Permission,
 };
-use curatom_key_kernel::{ApprovalDecision, Kernel};
-use curatom_ports::{Clock, HttpRequestDto, OrganicIdentityProvider};
-use curatom_sign::{DevSignVerifier, RealSignVerifier, SignVerifier};
+use curatom_sign::{DevSignVerifier, SignVerifier};
 use curatom_substrate_cloudflare::{
-    CloudflareAccessIdentityProvider, CloudflareClock,
-    DOEventLedger, DOStateStore, R2ArtifactStore,
-    ProductionCloudflareInorganicIdentityProvider,
+    to_dto, CloudflareAccessIdentityProvider, CloudflareClock, DOEventLedger, DOStateStore,
+    ProductionCloudflareInorganicIdentityProvider, R2ArtifactStore,
 };
+use curatom_ports::Clock;
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine as _;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use serde_json::{json, Value};
 
-type HmacSha256 = Hmac<Sha256>;
 type K = Kernel<DOStateStore, DOEventLedger, R2ArtifactStore, CloudflareClock>;
+
+/// A status and a body. `worker::Result` is single-parameter, so the
+/// handlers return this pair rather than a `Result` that `use worker::*`
+/// would shadow.
+type Reply = (u16, Value);
+
+/// How long an attestation is good for once handed to Elixir.
+const ATTESTATION_TTL_SECONDS: i64 = 300;
 
 #[durable_object]
 pub struct CuratomKernel {
@@ -26,9 +50,10 @@ pub struct CuratomKernel {
     owner_id: String,
     hmac_key: Vec<u8>,
     orchestrator_url: String,
+    // Built in `new()` while `env` is still in hand. The DO never holds `Env`.
     organic_idp: Option<CloudflareAccessIdentityProvider>,
-    inorganic_idp: Option<ProductionCloudflareInorganicIdentityProvider>,
-    bucket: Option<worker::Bucket>,
+    inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
+    bucket: Option<Bucket>,
 }
 
 #[durable_object]
@@ -41,17 +66,17 @@ impl DurableObject for CuratomKernel {
             .map(|v| v.to_string())
             .unwrap_or_else(|_| "organic_rajvansh".into());
 
-        let hmac_raw = env
+        let hmac_key = env
             .secret("CURATOM_HMAC_KEY")
-            .map(|s| s.to_string())
+            .map(|s| hmac_key_bytes(&s.to_string()))
             .unwrap_or_default();
-        let hmac_key = B64.decode(hmac_raw.as_bytes()).unwrap_or_default();
 
         let orchestrator_url = env
             .var("CURATOM_ORCHESTRATOR_URL")
             .map(|v| v.to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|_| "/v1/jobs".into());
 
+        let organic_idp = CloudflareAccessIdentityProvider::new(&env, owner_id.clone()).ok();
         let bucket = env.bucket("CURATOM_ARTIFACTS").ok();
 
         Self {
@@ -60,8 +85,8 @@ impl DurableObject for CuratomKernel {
             owner_id,
             hmac_key,
             orchestrator_url,
-            organic_idp: None,
-            inorganic_idp: None,
+            organic_idp,
+            inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
             bucket,
         }
     }
@@ -70,9 +95,8 @@ impl DurableObject for CuratomKernel {
         self.ensure().await?;
 
         let hr = to_dto(req).await?;
-        let url = Url::parse(&hr.url)?;
-        let path = url.path().to_string();
-        let method = hr.method.clone();
+        let path = Url::parse(&hr.url)?.path().to_string();
+        let method = hr.method.to_ascii_uppercase();
 
         let (status, body) = match (method.as_str(), path.as_str()) {
             ("GET", "/organic/me") => self.h_me(&hr).await,
@@ -103,11 +127,10 @@ impl DurableObject for CuratomKernel {
                 self.h_inorganic_status(&hr, &id).await
             }
             ("POST", "/internal/outcome") => self.h_internal_outcome(&hr).await,
-            _ => (404, serde_json::json!({"error": "not found"})),
+            _ => (404, json!({ "error": "not_found" })),
         };
 
-        let resp = Response::from_json(&body)?;
-        Ok(resp.with_status(status))
+        Ok(Response::from_json(&body)?.with_status(status))
     }
 }
 
@@ -116,354 +139,308 @@ impl CuratomKernel {
         if self.kernel.is_some() {
             return Ok(());
         }
-
         if self.owner_id.is_empty() {
             return Err(Error::RustError("CURATOM_OWNER_ID not configured".into()));
         }
-        if self.hmac_key.len() != 32 {
-            return Err(Error::RustError(format!(
-                "CURATOM_HMAC_KEY must decode to 32 bytes, got {}",
-                self.hmac_key.len()
-            )));
+        if self.hmac_key.is_empty() {
+            return Err(Error::RustError("CURATOM_HMAC_KEY not configured".into()));
         }
-
-        let store = DOStateStore::new(self.state.storage());
-        let ledger = DOEventLedger::new(self.state.storage());
+        if self.organic_idp.is_none() {
+            return Err(Error::RustError("organic identity provider unavailable".into()));
+        }
         let bucket = self
             .bucket
             .clone()
             .ok_or_else(|| Error::RustError("CURATOM_ARTIFACTS bucket missing".into()))?;
-        let artifacts = R2ArtifactStore::new(bucket, self.owner_id.clone());
 
         let mut k = Kernel::new(
             self.owner_id.clone(),
-            store,
-            ledger,
-            artifacts,
+            DOStateStore::new(self.state.storage()),
+            DOEventLedger::new(self.state.storage()),
+            R2ArtifactStore::new(bucket, self.owner_id.clone()),
             CloudflareClock,
         );
         k.load().await.map_err(Error::RustError)?;
-
         self.kernel = Some(k);
-        self.organic_idp = Some(CloudflareAccessIdentityProvider::new(
-            self.owner_id.clone(),
-        ));
-        self.inorganic_idp = Some(ProductionCloudflareInorganicIdentityProvider);
         Ok(())
     }
 
-    // ---- ORGANIC ----
-
-    async fn h_me(&self, hr: &HttpRequestDto) -> (u16, serde_json::Value) {
-        let idp = match &self.organic_idp {
-            Some(i) => i,
-            None => return (500, serde_json::json!({"error": "idp uninitialized"})),
-        };
-        let Ok(Some(id)) = idp.authenticate(hr).await else {
-            return (401, serde_json::json!({"error": "unauthenticated"}));
-        };
-        if id.id != self.owner_id {
-            return (403, serde_json::json!({"error": "not_owner"}));
+    /// Contract 1 is owner-only. Anything short of the owner is a refusal,
+    /// never a downgrade.
+    async fn owner(&self, hr: &HttpRequestDto) -> std::result::Result<(), Reply> {
+        let idp = self
+            .organic_idp
+            .as_ref()
+            .ok_or((500, json!({ "error": "idp_uninitialized" })))?;
+        match idp.authenticate(hr).await {
+            Ok(Some(id)) if id.id == self.owner_id => Ok(()),
+            Ok(Some(_)) => Err((403, json!({ "error": "not_owner" }))),
+            Ok(None) => Err((401, json!({ "error": "unauthenticated" }))),
+            Err(e) => Err((500, json!({ "error": e }))),
         }
-        (
-            200,
-            serde_json::json!({
-                "id": id.id,
-                "displayName": id.display_name,
-                "mode": "owner",
-            }),
-        )
     }
 
-    async fn h_create_intent(&mut self, hr: &HttpRequestDto) -> (u16, serde_json::Value) {
-        let auth = self.require_owner(hr).await;
-        if let Err(r) = auth {
+    // ---- organic ----
+
+    async fn h_me(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
             return r;
         }
-        let body: serde_json::Value = match serde_json::from_str(&hr.body) {
-            Ok(v) => v,
-            Err(_) => return (400, serde_json::json!({"error": "invalid_json"})),
+        (200, me_view(&self.owner_id))
+    }
+
+    async fn h_create_intent(&mut self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let Ok(body) = serde_json::from_str::<Value>(&hr.body) else {
+            return (400, json!({ "error": "invalid_json" }));
         };
         let Some(text) = body.get("text").and_then(|v| v.as_str()) else {
-            return (400, serde_json::json!({"error": "missing text"}));
+            return (400, json!({ "error": "missing_text" }));
         };
+        let owner = self.owner_id.clone();
         let k = self.kernel.as_mut().unwrap();
-        match k.create_intent(text.to_string()).await {
-            Ok(intent) => (201, serde_json::to_value(intent).unwrap()),
-            Err(e) => (500, serde_json::json!({"error": e})),
+        match k.create_intent(text, &owner).await {
+            Ok(intent) => (201, intent_view(&intent)),
+            Err(e) => (500, json!({ "error": e })),
         }
     }
 
-    async fn h_get_intent(&self, hr: &HttpRequestDto, intent_id: &str) -> (u16, serde_json::Value) {
-        let auth = self.require_owner(hr).await;
-        if let Err(r) = auth {
+    async fn h_get_intent(&self, hr: &HttpRequestDto, intent_id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
             return r;
         }
-        let k = self.kernel.as_ref().unwrap();
-        match k.get_intent(intent_id) {
-            Some(i) => (200, serde_json::to_value(i).unwrap()),
-            None => (404, serde_json::json!({"error": "unknown intent"})),
+        match self.kernel.as_ref().unwrap().get_intent(intent_id) {
+            Ok(Some(i)) => (200, intent_view(&i)),
+            Ok(None) => (404, json!({ "error": "unknown_intent" })),
+            Err(e) => (500, json!({ "error": e })),
         }
     }
 
-    async fn h_list_approvals(&self, hr: &HttpRequestDto) -> (u16, serde_json::Value) {
-        let auth = self.require_owner(hr).await;
-        if let Err(r) = auth {
+    async fn h_list_approvals(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
             return r;
         }
-        let k = self.kernel.as_ref().unwrap();
-        match k.list_pending_approvals(&self.owner_id) {
+        match self.kernel.as_ref().unwrap().list_pending_approvals() {
             Ok(list) => {
-                let out: Vec<serde_json::Value> = list
+                let out: Vec<Value> = list
                     .iter()
-                    .map(|a| {
-                        serde_json::json!({
-                            "id": a.id,
-                            "requester": a.human_label.requester,
-                            "reason": a.human_label.reason,
-                            "resources": a.human_label.resources,
-                            "permissions": a.human_label.permissions,
-                            "duration": human_duration(&a.human_label.duration),
-                        })
-                    })
+                    .map(|a| serde_json::to_value(approval_view(a)).unwrap_or(Value::Null))
                     .collect();
-                (200, serde_json::Value::Array(out))
+                (200, Value::Array(out))
             }
-            Err(e) => (500, serde_json::json!({"error": e})),
+            Err(e) => (500, json!({ "error": e })),
         }
     }
 
-    async fn h_approve(&mut self, hr: &HttpRequestDto, approval_id: &str) -> (u16, serde_json::Value) {
-        let auth = self.require_owner(hr).await;
-        if let Err(r) = auth {
+    /// Approve: SIGN2, decide, issue, consume every pair, attest, hand off.
+    ///
+    /// The consume happens before the POST on purpose. Elixir receives proof
+    /// that a capability was spent, never a capability it could spend itself.
+    async fn h_approve(&mut self, hr: &HttpRequestDto, approval_id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
             return r;
         }
-
-        let body: serde_json::Value = match serde_json::from_str(&hr.body) {
-            Ok(v) => v,
-            Err(_) => return (400, serde_json::json!({"error": "invalid_json"})),
+        let Ok(body) = serde_json::from_str::<Value>(&hr.body) else {
+            return (400, json!({ "error": "invalid_json" }));
         };
         let Some(sign2) = body.get("sign2").and_then(|v| v.as_str()) else {
-            return (400, serde_json::json!({"error": "missing sign2"}));
+            return (400, json!({ "error": "missing_sign2" }));
         };
-
-        let sign = DevSignVerifier::new();
-        if !matches!(sign.verify("sign2", &self.owner_id, sign2, "").await, Ok(true)) {
-            return (403, serde_json::json!({"error": "sign2 verification failed"}));
+        if !matches!(
+            DevSignVerifier::new()
+                .verify("sign2", &self.owner_id, sign2, approval_id)
+                .await,
+            Ok(true)
+        ) {
+            return (403, json!({ "error": "sign2_failed" }));
         }
 
-        // Snapshot everything we need from `self` BEFORE borrowing the kernel.
+        // Snapshot before borrowing the kernel mutably across awaits.
         let hmac_key = self.hmac_key.clone();
         let orchestrator_url = self.orchestrator_url.clone();
-        let approval_id_owned = approval_id.to_string();
+        let approval_id = approval_id.to_string();
 
         let k = self.kernel.as_mut().unwrap();
 
-        let Ok(Some(_approval)) = k
-            .decide_approval(&approval_id_owned, ApprovalDecision::Approve)
-            .await
-        else {
-            return (409, serde_json::json!({"error": "approval not pending or digest mismatch"}));
+        match k.decide_approval(&approval_id, ApprovalDecision::Approve).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return (409, json!({ "error": "approval_not_pending" })),
+            // digest_mismatch: the card moved under the owner. Not a server fault.
+            Err(e) => return (409, json!({ "error": e })),
+        }
+
+        let secret = match k.issue_grant(&approval_id).await {
+            Ok(Some(issued)) => issued.handle.secret,
+            Ok(None) => return (409, json!({ "error": "grant_already_issued" })),
+            Err(e) => return (500, json!({ "error": e })),
         };
 
-        let Ok(Some(issued)) = k.issue_grant(&approval_id_owned).await else {
-            return (500, serde_json::json!({"error": "grant issuance failed"}));
-        };
-
-        let secret = issued.handle.secret.clone();
-
-        // Build claims first; consume after we know we have a non-empty action set.
         let now = CloudflareClock.now_unix();
-        let mut claims_list = Vec::new();
+        let job_id = curatom_crypto::random_id("job");
+        let mut claims = Vec::new();
         for resource in &secret.resources {
             for op in &secret.permissions {
-                claims_list.push(curatom_attestation::AttestationClaims {
+                claims.push(AttestationClaims {
                     v: 1,
-                    job_id: curatom_crypto::random_id("job"),
+                    job_id: job_id.clone(),
                     grant_id: secret.grant_id.clone(),
                     requester_id: secret.requester_id.clone(),
                     resource: resource.clone(),
-                    operation: op_string(*op),
+                    operation: op.as_str().to_string(),
                     issued_unix: now,
-                    expires_unix: now + 300,
+                    expires_unix: now + ATTESTATION_TTL_SECONDS,
                     nonce: curatom_crypto::random_id("nonce"),
                 });
             }
         }
-        if claims_list.is_empty() {
-            return (400, serde_json::json!({"error": "no actions authorized by grant"}));
+        if claims.is_empty() {
+            return (400, json!({ "error": "no_actions_authorized" }));
         }
 
-        for c in &claims_list {
-            let perm = parse_op(&c.operation);
-            if k.consume_capability(&secret.token, &secret.requester_id, &c.resource, perm)
+        let mut actions = Vec::with_capacity(claims.len());
+        for c in &claims {
+            let op = Permission::parse(&c.operation);
+            if let Err(e) = k
+                .consume_capability(&secret.token, &secret.requester_id, &c.resource, op)
                 .await
-                .is_err()
             {
-                return (500, serde_json::json!({"error": "capability consumption failed"}));
+                return (500, json!({ "error": e }));
+            }
+            match curatom_attestation::sign(c, &hmac_key) {
+                Ok(token) => actions.push(json!({
+                    "resource": c.resource,
+                    "operation": c.operation,
+                    "attestation": token,
+                })),
+                Err(e) => return (500, json!({ "error": e })),
             }
         }
 
-        let mut actions = Vec::with_capacity(claims_list.len());
-        for c in &claims_list {
-            let token = match curatom_attestation::sign(c, &hmac_key) {
-                Ok(t) => t,
-                Err(e) => return (500, serde_json::json!({"error": e})),
-            };
-            actions.push(serde_json::json!({
-                "resource": c.resource,
-                "operation": c.operation,
-                "attestation": token,
-            }));
-        }
-
-        let envelope = serde_json::json!({
-            "job_id": claims_list[0].job_id,
-            "approval_id": approval_id_owned,
+        let envelope = json!({
+            "job_id": job_id,
+            "approval_id": approval_id,
             "intent_id": secret.intent_id,
             "requester_id": secret.requester_id,
             "actions": actions,
         });
-
-        let envelope_bytes = match serde_json::to_vec(&envelope) {
-            Ok(b) => b,
-            Err(e) => return (500, serde_json::json!({"error": e.to_string()})),
-        };
-
-        let envelope_sig = hmac_hex(&envelope_bytes, &hmac_key);
-
-        let mut init = RequestInit::new();
-        init = init.with_method(Method::Post);
-        let body_str = match std::str::from_utf8(&envelope_bytes) {
+        let raw = match serde_json::to_string(&envelope) {
             Ok(s) => s,
-            Err(e) => return (500, serde_json::json!({"error": e.to_string()})),
+            Err(e) => return (500, json!({ "error": e.to_string() })),
         };
-        init = init.with_body(Some(wasm_bindgen::JsValue::from_str(body_str)));
 
-        let headers = Headers::new();
-        let _ = headers.set("content-type", "application/json");
-        let _ = headers.set("x-curatom-hmac", &envelope_sig);
-        init = init.with_headers(headers);
-
-        let req = match Request::new_with_init(&orchestrator_url, &init) {
-            Ok(r) => r,
-            Err(e) => return (500, serde_json::json!({"error": format!("build: {e}")})),
-        };
-        match req.send().await {
-            Ok(resp) if resp.status_code() < 400 => {
-                (200, serde_json::json!({"ok": true, "job_handed_off": true}))
-            }
-            Ok(resp) => (
-                502,
-                serde_json::json!({"error": format!("orchestrator status {}", resp.status_code())}),
-            ),
-            Err(e) => (502, serde_json::json!({"error": format!("send: {e}")})),
+        match post_signed(&orchestrator_url, &raw, &hmac_key).await {
+            Ok(code) if code < 400 => (200, json!({ "ok": true, "job_id": job_id })),
+            Ok(code) => (502, json!({ "error": format!("orchestrator_status_{code}") })),
+            Err(e) => (502, json!({ "error": format!("orchestrator_unreachable: {e}") })),
         }
     }
 
-    async fn h_refuse(&mut self, hr: &HttpRequestDto, approval_id: &str) -> (u16, serde_json::Value) {
-        let auth = self.require_owner(hr).await;
-        if let Err(r) = auth {
+    async fn h_refuse(&mut self, hr: &HttpRequestDto, approval_id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
             return r;
         }
         let k = self.kernel.as_mut().unwrap();
         match k.decide_approval(approval_id, ApprovalDecision::Refuse).await {
-            Ok(Some(_)) => (200, serde_json::json!({"ok": true})),
-            Ok(None) => (409, serde_json::json!({"error": "approval not pending"})),
-            Err(e) => (500, serde_json::json!({"error": e})),
+            Ok(Some(_)) => (200, json!({ "ok": true })),
+            Ok(None) => (409, json!({ "error": "approval_not_pending" })),
+            Err(e) => (500, json!({ "error": e })),
         }
     }
 
-    async fn h_activity(&self, hr: &HttpRequestDto) -> (u16, serde_json::Value) {
-        let auth = self.require_owner(hr).await;
-        if let Err(r) = auth {
+    async fn h_activity(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
             return r;
         }
-        let k = self.kernel.as_ref().unwrap();
-        match k.list_events().await {
-            Ok(events) => {
-                let out: Vec<serde_json::Value> = events
+        match self.kernel.as_ref().unwrap().activity() {
+            Ok(items) => {
+                let out: Vec<Value> = items
                     .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "seq": e.seq,
-                            "at": e.at,
-                            "kind": e.kind,
-                            "actor": e.actor,
-                        })
-                    })
+                    .map(|a| serde_json::to_value(activity_view(a)).unwrap_or(Value::Null))
                     .collect();
-                (200, serde_json::Value::Array(out))
+                (200, Value::Array(out))
             }
-            Err(e) => (500, serde_json::json!({"error": e})),
+            Err(e) => (500, json!({ "error": e })),
         }
     }
 
-    // ---- INORGANIC ----
+    // ---- inorganic ----
+    //
+    // Machine identity is deferred and the provider throws. That is the whole
+    // behaviour: a request from a machine is refused because nothing here can
+    // say who the machine is. The kernel call below runs only if that ever
+    // changes.
 
-    async fn h_inorganic_submit(&mut self, hr: &HttpRequestDto) -> (u16, serde_json::Value) {
-        // Machine auth in v0 fails closed by design. Production must configure a real provider.
-        let idp = match &self.inorganic_idp {
-            Some(i) => i,
-            None => return (500, serde_json::json!({"error": "idp uninitialized"})),
-        };
-        let _identity = match idp.authenticate(hr).await {
+    async fn h_inorganic_submit(&mut self, hr: &HttpRequestDto) -> Reply {
+        let identity = match self.inorganic_idp.authenticate(hr).await {
             Ok(Some(id)) => id,
-            Ok(None) => return (401, serde_json::json!({"error": "unauthenticated"})),
-            Err(e) => return (503, serde_json::json!({"error": e})),
+            Ok(None) => return (401, json!({ "error": "unauthenticated" })),
+            Err(e) => return (503, json!({ "error": e })),
         };
-        // If we reach here in a non-production environment with a dev provider,
-        // continue. Otherwise fail closed. For v0, fail closed:
-        (503, serde_json::json!({"error": "no machine-auth configured"}))
-    }
-
-    async fn h_inorganic_status(
-        &self,
-        hr: &HttpRequestDto,
-        _request_id: &str,
-    ) -> (u16, serde_json::Value) {
-        let idp = match &self.inorganic_idp {
-            Some(i) => i,
-            None => return (500, serde_json::json!({"error": "idp uninitialized"})),
+        let Ok(body) = serde_json::from_str::<Value>(&hr.body) else {
+            return (400, json!({ "error": "invalid_json" }));
         };
-        match idp.authenticate(hr).await {
-            Ok(None) => (401, serde_json::json!({"error": "unauthenticated"})),
-            Err(e) => (503, serde_json::json!({"error": e})),
-            Ok(Some(_)) => (503, serde_json::json!({"error": "no machine-auth configured"})),
+        let req = InorganicRequest {
+            requester_id: identity.id,
+            reason: body["reason"].as_str().unwrap_or_default().to_string(),
+            resources: body["resources"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+                .unwrap_or_default(),
+            permissions: body["permissions"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).map(Permission::parse).collect())
+                .unwrap_or_else(|| vec![Permission::Read]),
+            duration: match body["duration"]["seconds"].as_u64() {
+                Some(seconds) => CuratomDuration::Ttl { seconds },
+                None => CuratomDuration::SingleUse,
+            },
+        };
+        let k = self.kernel.as_mut().unwrap();
+        match k.submit_inorganic(req).await {
+            Ok(a) => (202, curatom_inorganic_router::submitted_view(&a)),
+            Err(e) => (400, json!({ "error": e })),
         }
     }
 
-    // ---- INTERNAL (Elixir callback) ----
-
-    async fn h_internal_outcome(&mut self, hr: &HttpRequestDto) -> (u16, serde_json::Value) {
-        let hmac_key = self.hmac_key.clone();
-        let Some(provided) = hr.headers.get("x-curatom-hmac") else {
-            return (401, serde_json::json!({"error": "missing hmac"}));
-        };
-        let expected = hmac_hex(hr.body.as_bytes(), &hmac_key);
-        if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-            return (401, serde_json::json!({"error": "bad hmac"}));
+    async fn h_inorganic_status(&self, hr: &HttpRequestDto, approval_id: &str) -> Reply {
+        match self.inorganic_idp.authenticate(hr).await {
+            Ok(None) => return (401, json!({ "error": "unauthenticated" })),
+            Err(e) => return (503, json!({ "error": e })),
+            Ok(Some(_)) => {}
         }
+        match self.kernel.as_ref().unwrap().get_approval(approval_id) {
+            Ok(Some(a)) => (200, curatom_inorganic_router::status_view(&a)),
+            Ok(None) => (404, json!({ "error": "unknown_request" })),
+            Err(e) => (500, json!({ "error": e })),
+        }
+    }
 
-        let body: serde_json::Value = match serde_json::from_str(&hr.body) {
-            Ok(v) => v,
-            Err(_) => return (400, serde_json::json!({"error": "invalid_json"})),
+    // ---- internal (Contract 3 callback) ----
+
+    async fn h_internal_outcome(&mut self, hr: &HttpRequestDto) -> Reply {
+        let Some(provided) = hr.header("x-curatom-hmac") else {
+            return (401, json!({ "error": "missing_hmac" }));
+        };
+        let expected = hmac_hex(hr.body.as_bytes(), &self.hmac_key);
+        if !curatom_attestation::constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            return (401, json!({ "error": "bad_hmac" }));
+        }
+        let Ok(body) = serde_json::from_str::<Value>(&hr.body) else {
+            return (400, json!({ "error": "invalid_json" }));
         };
 
         let outcome = Outcome {
             id: curatom_crypto::random_id("out"),
-            intent_id: body["intent_id"].as_str().unwrap_or("").into(),
-            execution_id: body["job_id"].as_str().unwrap_or("").into(),
-            grant_id: body["grant_id"].as_str().unwrap_or("").into(),
-            resource: body["resource"].as_str().unwrap_or("").into(),
-            operation: parse_op(body["operation"].as_str().unwrap_or("read")),
+            intent_id: body["intent_id"].as_str().unwrap_or_default().into(),
+            execution_id: body["job_id"].as_str().unwrap_or_default().into(),
+            grant_id: body["grant_id"].as_str().unwrap_or_default().into(),
+            resource: body["resource"].as_str().unwrap_or_default().into(),
+            operation: Permission::parse(body["operation"].as_str().unwrap_or("read")),
             ok: body["ok"].as_bool().unwrap_or(false),
             data: body.get("data").cloned(),
             error: body.get("error").and_then(|v| v.as_str()).map(String::from),
-            human_summary: body
-                .get("human_summary")
-                .and_then(|v| v.as_str())
-                .map(String::from),
             provider: "hostos".into(),
             mock: body["mock"].as_bool(),
             at: CloudflareClock.now_iso(),
@@ -471,93 +448,25 @@ impl CuratomKernel {
 
         let k = self.kernel.as_mut().unwrap();
         match k.record_outcome(outcome).await {
-            Ok(_) => (200, serde_json::json!({"ok": true})),
-            Err(e) => (500, serde_json::json!({"error": e})),
-        }
-    }
-
-    // ---- helpers ----
-
-    async fn require_owner(
-        &self,
-        hr: &HttpRequestDto,
-    ) -> Result<(), (u16, serde_json::Value)> {
-        let idp = self
-            .organic_idp
-            .as_ref()
-            .ok_or((500, serde_json::json!({"error": "idp uninitialized"})))?;
-        match idp.authenticate(hr).await {
-            Ok(Some(id)) if id.id == self.owner_id => Ok(()),
-            Ok(Some(_)) => Err((403, serde_json::json!({"error": "not_owner"}))),
-            Ok(None) => Err((401, serde_json::json!({"error": "unauthenticated"}))),
-            Err(e) => Err((500, serde_json::json!({"error": e}))),
+            Ok(()) => (200, json!({ "ok": true })),
+            Err(e) => (500, json!({ "error": e })),
         }
     }
 }
 
-// ---- module-level helpers ----
+/// Contract 2's one POST. `RequestInit`'s builders return `&mut Self`, and
+/// `worker::Request` has no `send` -- outbound goes through `Fetch`.
+async fn post_signed(url: &str, raw: &str, key: &[u8]) -> Result<u16> {
+    let mut headers = Headers::new();
+    headers.set("content-type", "application/json")?;
+    headers.set("x-curatom-hmac", &hmac_hex(raw.as_bytes(), key))?;
 
-async fn to_dto(mut req: Request) -> Result<HttpRequestDto> {
-    let method = req.method().to_string();
-    let url = req.url()?.to_string();
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(wasm_bindgen::JsValue::from_str(raw)));
 
-    let mut headers = std::collections::BTreeMap::new();
-    for (k, v) in req.headers().entries() {
-        headers.insert(k.to_ascii_lowercase(), v);
-    }
-
-    let body = if method == "GET" {
-        String::new()
-    } else {
-        req.text().await.unwrap_or_default()
-    };
-
-    Ok(HttpRequestDto {
-        method,
-        url,
-        headers,
-        body,
-    })
+    let req = Request::new_with_init(url, &init)?;
+    let resp = Fetch::Request(req).send().await?;
+    Ok(resp.status_code())
 }
-
-fn hmac_hex(msg: &[u8], key: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("32-byte key");
-    mac.update(msg);
-    hex::encode(mac.finalize().into_bytes())
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut x = 0u8;
-    for i in 0..a.len() {
-        x |= a[i] ^ b[i];
-    }
-    x == 0
-}
-
-fn op_string(p: Permission) -> String {
-    match p {
-        Permission::Read => "read".into(),
-        Permission::Write => "write".into(),
-    }
-}
-
-fn parse_op(s: &str) -> Permission {
-    match s {
-        "write" => Permission::Write,
-        _ => Permission::Read,
-    }
-}
-
-fn human_duration(d: &Duration) -> String {
-    match d {
-        Duration::SingleUse => "one request".into(),
-        Duration::Ttl { seconds } => format!("{seconds} seconds"),
-    }
-}
-
-// Unused import silencer for symbols only used in match arms above.
-#[allow(dead_code)]
-fn _keep_imports(_: Approval, _: Intent, _: StateError, _: RealSignVerifier) {}

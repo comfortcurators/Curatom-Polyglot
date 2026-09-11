@@ -22,11 +22,6 @@ These are not fake. They are not implemented.
   and a `:timer` based cancellation.
 - **Real HostOS adapter.** Mock only. The adapter behaviour is stable; the
   real one wires to HostOS-MCP.
-- **Rust DO compilation.** `workers/api` is shaped correctly (inline
-  dispatch, no router holding `&mut Kernel` across `.await`) but is not a
-  workspace member and is not `cargo check`-verified on wasm32. Expect
-  borrow errors around `self.env` access inside async handlers — the fix is
-  to snapshot env values before the borrow, which is a mechanical change.
 - **`cargo clippy --workspace -- -D warnings`.** Not a release gate yet.
 - **Live Worker ↔ Elixir seam test.** The HMAC envelope is tested in Rust
   (sign, verify, replay, TTL) and the Elixir modules have unit tests for

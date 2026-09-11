@@ -24,5 +24,7 @@ curatom-crypto = { path = "../../crates/crypto" }
 curatom-ports = { path = "../../crates/ports" }
 curatom-key-kernel = { path = "../../crates/key-kernel" }
 curatom-sign = { path = "../../crates/sign" }
+curatom-organic-router = { path = "../../crates/organic-router" }
+curatom-inorganic-router = { path = "../../crates/inorganic-router" }
 curatom-attestation = { path = "../../crates/attestation" }
 curatom-substrate-cloudflare = { path = "../../crates/substrate-cloudflare" }
