@@ -32,7 +32,7 @@ new_sqlite_classes = ["Scratchpad"]
 binding = "CURATOM_LEDGER"
 database_name = "curatom-ledger"
 # Cloudflare team: npx wrangler d1 create curatom-ledger, paste the id here.
-database_id = "PASTE_D1_ID_AFTER_CREATION"
+database_id = "daf59f1c-9003-4bff-92bf-18b15586d523"
 
 [[r2_buckets]]
 binding = "CURATOM_ARTIFACTS"
