@@ -309,6 +309,16 @@ fn upstream_error_message(err: &Value) -> String {
         .to_string()
 }
 
+/// JSON-RPC's own code for calling a tool that isn't registered on the
+/// scoped surface -- verified live against hostos-mcp's real response
+/// (`{"code":-32602,"message":"Tool exec not found"}`). This is the MCP
+/// SDK's own dispatch behavior, not HostOS's wording, so it doesn't move
+/// if HostOS ever rephrases the message. Matching on `message` instead
+/// would be the same fragility this gateway exists to avoid: a fact that
+/// lives in a service this Worker can't verify, silently reverting to a
+/// bare 502 the moment the string changes.
+const RPC_UNKNOWN_TOOL: i64 = -32602;
+
 pub async fn handle_tools_list(req: Request, env: &Env) -> Result<Response> {
     let authorized = match authorize(&req, env).await {
         Ok(a) => a,
@@ -368,11 +378,10 @@ pub async fn handle_tools_call(mut req: Request, env: &Env) -> Result<Response> 
         Err(err) => {
             let msg = upstream_error_message(&err);
             // An unregistered tool on a scoped surface is a 404-shaped fact
-            // about what this key can reach, not a gateway fault. HostOS's
-            // real message is "Tool <name> not found" -- verified live,
-            // not "unknown tool" as first guessed.
-            let lower = msg.to_lowercase();
-            let status = if lower.contains("not found") || lower.contains("unknown tool") { 404 } else { 502 };
+            // about what this key can reach, not a gateway fault. Matched
+            // on the JSON-RPC code, not the message -- see RPC_UNKNOWN_TOOL.
+            let is_unknown_tool = err.get("code").and_then(|c| c.as_i64()) == Some(RPC_UNKNOWN_TOOL);
+            let status = if is_unknown_tool { 404 } else { 502 };
             rest_error(status, msg)
         }
     }
