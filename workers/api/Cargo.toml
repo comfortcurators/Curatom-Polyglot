@@ -29,3 +29,4 @@ curatom-organic-router = { path = "../../crates/organic-router" }
 curatom-inorganic-router = { path = "../../crates/inorganic-router" }
 curatom-attestation = { path = "../../crates/attestation" }
 curatom-substrate-cloudflare = { path = "../../crates/substrate-cloudflare" }
+curatom-resource-registry = { path = "../../crates/resource-registry" }

@@ -46,6 +46,14 @@ custom_domain = true
 binding = "CURATOM_ORCHESTRATOR"
 service = "curatom-orchestrator"
 
+# Real data for the dashboard, read live through hostos-mcp's own GitHub
+# App and Cloudflare credentials -- never held here. hostos-mcp admits
+# "curatom-kernel" as a known internal caller (identity.ts) and this
+# route only ever asks for the "oauth" (read-only + curator_act) scope.
+[[services]]
+binding = "HOSTOS_MCP"
+service = "hostos-mcp"
+
 # The web dashboard: Rust compiled to WASM via Leptos + Trunk
 # (apps/dashboard), not TypeScript/React -- one language across the whole
 # stack, same as the Rust kernel it talks to. The swipe/zoom UI uses raw
@@ -58,7 +66,7 @@ service = "curatom-orchestrator"
 directory = "./apps/dashboard/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health", "/scratch/*"]
+run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health", "/scratch/*", "/mcp"]
 
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"

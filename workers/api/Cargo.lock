@@ -198,6 +198,7 @@ dependencies = [
  "curatom-organic-router",
  "curatom-ports",
  "curatom-protocol",
+ "curatom-resource-registry",
  "curatom-sign",
  "curatom-substrate-cloudflare",
  "hex",

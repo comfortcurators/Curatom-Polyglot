@@ -35,6 +35,7 @@ use curatom_ports::Clock;
 
 use serde_json::{json, Value};
 
+mod mcp_gateway;
 mod scratchpad;
 pub use scratchpad::Scratchpad;
 
@@ -52,6 +53,13 @@ const ATTESTATION_TTL_SECONDS: i64 = 300;
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    // The capability broker needs the raw Authorization header and the raw
+    // body to forward upstream -- both consumed by `to_dto` on the DO path
+    // below -- and it holds no Durable Object state, only D1 and the
+    // HOSTOS_MCP service binding. Handled here, before the DO, not inside it.
+    if req.path() == "/mcp" {
+        return mcp_gateway::handle_mcp(req, &env).await;
+    }
     let ns = env.durable_object("CURATOM_KERNEL")?;
     let id = ns.id_from_name(&env.var("CURATOM_OWNER_ID")?.to_string())?;
     id.get_stub()?.fetch_with_request(req).await
@@ -189,6 +197,7 @@ impl DurableObject for CuratomKernel {
                 self.h_internal_authorize_provision(&hr).await
             }
             ("GET", "/organic/frozen") => self.h_frozen_list(&hr).await,
+            ("GET", "/organic/estate") => self.h_estate(&hr).await,
             _ => (404, json!({ "error": "not_found" })),
         };
 
@@ -609,6 +618,59 @@ impl CuratomKernel {
                 Err(e) => return (500, json!({ "error": e })),
             }
         };
+
+        // hostos_mcp is its own grant kind, not a resource read: approval
+        // mints a time-boxed row in the capabilities D1 table (mcp_gateway.rs)
+        // keyed on the same key the AI already holds, rather than an
+        // orchestrator job. Handled and returned here, before any of the
+        // Valhalla/attestation/orchestrator machinery below, none of which
+        // applies to MCP access.
+        if knock
+            .resources
+            .iter()
+            .any(|r| r == curatom_resource_registry::HOSTOS_MCP)
+        {
+            let db = match self.env.d1("CURATOM_LEDGER") {
+                Ok(d) => d,
+                Err(e) => return (500, json!({ "error": format!("d1: {e}") })),
+            };
+            let now = CloudflareClock.now_unix();
+            let ttl_seconds = match &knock.duration {
+                CuratomDuration::SingleUse => 300i64,
+                CuratomDuration::Ttl { seconds } => *seconds as i64,
+            };
+            let expires_at = now + ttl_seconds;
+            let key_hash = curatom_crypto::sha256_hex(knock.token.as_bytes());
+            let stmt = db.prepare(
+                "INSERT INTO capabilities (key_hash, scope, expires_at, revoked, label, knock_id, created_at) \
+                 VALUES (?1, 'oauth', ?2, 0, ?3, ?4, ?5) \
+                 ON CONFLICT(key_hash) DO UPDATE SET \
+                   scope = excluded.scope, expires_at = excluded.expires_at, \
+                   revoked = 0, knock_id = excluded.knock_id",
+            );
+            let bound = match stmt.bind(&[
+                key_hash.clone().into(),
+                expires_at.into(),
+                knock.name.clone().into(),
+                knock.id.clone().into(),
+                now.into(),
+            ]) {
+                Ok(b) => b,
+                Err(e) => return (500, json!({ "error": format!("bind: {e}") })),
+            };
+            if let Err(e) = bound.run().await {
+                return (500, json!({ "error": format!("capability insert: {e}") }));
+            }
+            return (
+                200,
+                json!({
+                    "ok": true,
+                    "hostos_mcp_capability": true,
+                    "scope": "oauth",
+                    "expires_at": expires_at,
+                }),
+            );
+        }
 
         let wants_valhalla = knock.resources.iter().any(|r| r.starts_with("valhalla."));
         let mut valhalla_sandbox_id: Option<String> = None;
@@ -1439,6 +1501,89 @@ impl CuratomKernel {
             .collect();
         (200, json!({ "frozen": list }))
     }
+
+    /// Real data for the dashboard, pulled live through hostos-mcp's own
+    /// GitHub App and Cloudflare credentials -- never held here. Read-only
+    /// tools only, via the "oauth" scope (see scope.ts): this route can
+    /// prove the estate is configured and reachable, never exec or write.
+    async fn h_estate(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let fetcher = match self.env.service("HOSTOS_MCP") {
+            Ok(f) => f,
+            Err(e) => return (502, json!({ "error": format!("service binding: {e}") })),
+        };
+
+        let workspace = call_hostos_mcp_tool(&fetcher, "workspace_status", json!({}))
+            .await
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+        let github = call_hostos_mcp_tool(&fetcher, "github_app_status", json!({}))
+            .await
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+
+        (200, json!({ "workspace": workspace, "github": github }))
+    }
+}
+
+/// One `tools/call` against hostos-mcp's internal MCP endpoint, over the
+/// HOSTOS_MCP service binding -- the same fast path Reek and Mimi already
+/// use, with an explicit identity so curatom-kernel gets its own workspace
+/// rather than falling into Reek's (see identity.ts, resolveInternalCaller).
+/// `x-internal-scope: oauth` restricts this to read-only tools plus
+/// curator_act; exec/file_write are unreachable at tool *registration*,
+/// not filtered client-side (see scope.ts, assertToolCatalog).
+async fn call_hostos_mcp_tool(fetcher: &Fetcher, name: &str, arguments: Value) -> Result<Value> {
+    let headers = Headers::new();
+    headers.set("content-type", "application/json")?;
+    headers.set("accept", "application/json, text/event-stream")?;
+    headers.set("x-internal-caller", "curatom-kernel")?;
+    headers.set("x-internal-scope", "oauth")?;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments },
+    })
+    .to_string();
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(wasm_bindgen::JsValue::from_str(&body)));
+
+    let req = Request::new_with_init("https://hostos-mcp.internal/mcp", &init)?;
+    let mut resp = fetcher.fetch_request(req).await?;
+    let status = resp.status_code();
+    let text = resp.text().await.unwrap_or_default();
+    if status >= 400 {
+        return Err(Error::RustError(format!("hostos-mcp {status}: {text}")));
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let parsed: Value = if content_type.contains("text/event-stream") {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("data:"))
+            .ok_or_else(|| Error::RustError("hostos-mcp: no SSE data".into()))?;
+        serde_json::from_str(line.trim_start_matches("data:").trim())
+            .map_err(|e| Error::RustError(format!("hostos-mcp: bad SSE json: {e}")))?
+    } else {
+        serde_json::from_str(&text)
+            .map_err(|e| Error::RustError(format!("hostos-mcp: bad json: {e}")))?
+    };
+
+    if let Some(err) = parsed.get("error") {
+        return Err(Error::RustError(err.to_string()));
+    }
+    let result = parsed.get("result").cloned().unwrap_or(parsed);
+    Ok(result.get("structuredContent").cloned().unwrap_or(result))
 }
 
 /// Contract 2's one POST. Service binding, not a public URL.
