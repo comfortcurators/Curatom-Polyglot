@@ -34,14 +34,7 @@ pub fn handoff_form(token: &str) -> Value {
             "permissions": ["read"],
             "duration": { "kind": "single_use" }
         },
-        "available_resources": [
-            "hostos.inventory",
-            "hostos.metadata",
-            "cloudflare.inventory",
-            "company.whitepaper",
-            "company.inventory",
-            "repository.inventory"
-        ],
+        "available_resources": curatom_resource_registry::all(),
         "available_permissions": ["read", "write"],
         "note": "The operator will see your request. They have 88 seconds to approve. If they do not recognize your name, they will not approve it."
     })

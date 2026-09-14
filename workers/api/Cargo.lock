@@ -119,6 +119,7 @@ name = "curatom-inorganic-router"
 version = "0.1.0"
 dependencies = [
  "curatom-protocol",
+ "curatom-resource-registry",
  "serde_json",
 ]
 

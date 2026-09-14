@@ -7,4 +7,5 @@ publish.workspace = true
 
 [dependencies]
 curatom-protocol = { path = "../protocol" }
+curatom-resource-registry = { path = "../resource-registry" }
 serde_json.workspace = true

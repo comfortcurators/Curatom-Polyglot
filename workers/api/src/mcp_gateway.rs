@@ -15,7 +15,7 @@
 //! A request with no live capability never reaches HostOS at all.
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use worker::*;
 
 use curatom_ports::Clock;
@@ -109,14 +109,29 @@ async fn lookup_capability(env: &Env, key_hash: &str) -> Result<Option<Capabilit
     stmt.first::<CapabilityRow>(None).await
 }
 
-pub async fn handle_mcp(mut req: Request, env: &Env) -> Result<Response> {
-    let Some(presented) = bearer(&req) else {
-        return rpc_error(
-            None,
+/// Outcome of a validated capability, shared by every entry point (`/mcp`,
+/// `/tools/list`, `/tools/call`) so the bearer -> hash -> lookup ->
+/// revoked/expired/scope sequence exists exactly once.
+struct Authorized {
+    key_hash: String,
+    scope: String,
+}
+
+enum AuthFailure {
+    /// No credential, unknown key, revoked, or expired -- code and message
+    /// are exactly what the JSON-RPC error body needs.
+    Rpc(i32, &'static str),
+    /// D1 itself did not answer -- refuse, do not admit.
+    Store,
+}
+
+async fn authorize(req: &Request, env: &Env) -> std::result::Result<Authorized, AuthFailure> {
+    let Some(presented) = bearer(req) else {
+        return Err(AuthFailure::Rpc(
             -32000,
             "No Curatom capability presented. Mint a key at curatom.rajvansh.dev, \
              then paste it along with the handoff block that key came with.",
-        );
+        ));
     };
 
     let key_hash = sha256_hex(&presented);
@@ -126,14 +141,45 @@ pub async fn handle_mcp(mut req: Request, env: &Env) -> Result<Response> {
     let capability = match lookup_capability(env, &key_hash).await {
         Ok(Some(row)) => row,
         Ok(None) => {
-            return rpc_error(
-                None,
+            return Err(AuthFailure::Rpc(
                 -32000,
                 "Unknown Curatom key. Mint a new key at curatom.rajvansh.dev.",
-            );
+            ));
         }
         Err(err) => {
             console_error!("capability lookup failed: {err}");
+            return Err(AuthFailure::Store);
+        }
+    };
+
+    if capability.revoked != 0 {
+        return Err(AuthFailure::Rpc(-32000, "This Curatom key has been revoked."));
+    }
+
+    let now = CloudflareClock.now_unix();
+    if now >= capability.expires_at {
+        return Err(AuthFailure::Rpc(
+            -32001,
+            "Curatom capability window has expired. Ask the operator to approve a new one.",
+        ));
+    }
+
+    let scope = match capability.scope.as_str() {
+        "oauth" | "full" => capability.scope.clone(),
+        other => {
+            console_error!("capability {key_hash} has invalid scope {other}");
+            return Err(AuthFailure::Rpc(-32002, "Curatom capability record is invalid."));
+        }
+    };
+
+    Ok(Authorized { key_hash, scope })
+}
+
+pub async fn handle_mcp(mut req: Request, env: &Env) -> Result<Response> {
+    let authorized = match authorize(&req, env).await {
+        Ok(a) => a,
+        Err(AuthFailure::Rpc(code, message)) => return rpc_error(None, code, message),
+        Err(AuthFailure::Store) => {
             return rpc_error(
                 None,
                 -32002,
@@ -142,27 +188,7 @@ pub async fn handle_mcp(mut req: Request, env: &Env) -> Result<Response> {
             );
         }
     };
-
-    if capability.revoked != 0 {
-        return rpc_error(None, -32000, "This Curatom key has been revoked.");
-    }
-
-    let now = CloudflareClock.now_unix();
-    if now >= capability.expires_at {
-        return rpc_error(
-            None,
-            -32001,
-            "Curatom capability window has expired. Ask the operator to approve a new one.",
-        );
-    }
-
-    let scope = match capability.scope.as_str() {
-        "oauth" | "full" => capability.scope.clone(),
-        other => {
-            console_error!("capability {key_hash} has invalid scope {other}");
-            return rpc_error(None, -32002, "Curatom capability record is invalid.");
-        }
-    };
+    let Authorized { key_hash, scope } = authorized;
 
     let body = req.text().await?;
     if body.len() > MAX_BODY_BYTES {
@@ -200,4 +226,154 @@ pub async fn handle_mcp(mut req: Request, env: &Env) -> Result<Response> {
     out.headers_mut().set("content-type", &content_type)?;
     out.headers_mut().set("cache-control", "no-store")?;
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// REST facade: /tools/list, /tools/call
+//
+// Same capability (same D1 row, same expiry, same scope) as /mcp, reachable
+// by a plain-HTTP caller that has no MCP client and no JSON-RPC framing --
+// DeepSeek, or anything else that only speaks "POST JSON, get JSON back".
+// A body here is a plain result or a plain {"error": "..."} object, never a
+// JSON-RPC envelope; a status code carries the outcome, same as any other
+// REST endpoint in this Worker.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct RestErrorBody {
+    error: String,
+}
+
+fn rest_error(status: u16, message: impl Into<String>) -> Result<Response> {
+    let body = RestErrorBody { error: message.into() };
+    let resp = Response::from_json(&body)?.with_status(status);
+    Ok(resp)
+}
+
+/// Sends one JSON-RPC request upstream through the same scope-stamped path
+/// as `handle_mcp`, and unwraps the envelope: `Ok(result)` on success,
+/// `Err(error_value)` for an upstream-reported failure (e.g. "unknown
+/// tool" from HostOS's own scoped registration refusal). This is the piece
+/// that lets a plain-HTTP caller receive a normal JSON body instead of a
+/// protocol envelope it was never going to parse.
+async fn call_upstream(
+    env: &Env,
+    key_hash: &str,
+    scope: &str,
+    method: &str,
+    params: Value,
+) -> Result<std::result::Result<Value, Value>> {
+    let rpc_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    })
+    .to_string();
+
+    let headers = Headers::new();
+    headers.set("content-type", "application/json")?;
+    headers.set("accept", "application/json, text/event-stream")?;
+    headers.set("x-internal-caller", &format!("curatom-key:{key_hash}"))?;
+    headers.set("x-internal-scope", scope)?;
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(wasm_bindgen::JsValue::from_str(&rpc_body)));
+
+    let upstream_req = Request::new_with_init(INTERNAL_URL, &init)?;
+    let fetcher = env.service("HOSTOS_MCP")?;
+    let mut upstream_resp = fetcher.fetch_request(upstream_req).await?;
+    let raw = upstream_resp.text().await?;
+
+    // hostos-mcp answers either bare JSON or an SSE `data:` frame depending
+    // on the call; both carry the same JSON-RPC envelope underneath.
+    let envelope: Value = match raw.lines().find(|l| l.starts_with("data:")) {
+        Some(data_line) => {
+            serde_json::from_str(data_line.trim_start_matches("data:").trim()).unwrap_or(Value::Null)
+        }
+        None => serde_json::from_str(&raw).unwrap_or(Value::Null),
+    };
+
+    if let Some(err) = envelope.get("error") {
+        return Ok(Err(err.clone()));
+    }
+    Ok(Ok(envelope.get("result").cloned().unwrap_or(Value::Null)))
+}
+
+fn upstream_error_message(err: &Value) -> String {
+    err.get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("upstream error")
+        .to_string()
+}
+
+pub async fn handle_tools_list(req: Request, env: &Env) -> Result<Response> {
+    let authorized = match authorize(&req, env).await {
+        Ok(a) => a,
+        Err(AuthFailure::Rpc(_, message)) => return rest_error(401, message),
+        Err(AuthFailure::Store) => {
+            return rest_error(
+                503,
+                "Curatom could not verify this key right now. Access is refused until \
+                 the capability store answers.",
+            );
+        }
+    };
+
+    match call_upstream(env, &authorized.key_hash, &authorized.scope, "tools/list", json!({})).await? {
+        Ok(result) => {
+            let mut resp = Response::from_json(&result)?;
+            resp.headers_mut().set("cache-control", "no-store")?;
+            Ok(resp)
+        }
+        Err(err) => rest_error(502, upstream_error_message(&err)),
+    }
+}
+
+pub async fn handle_tools_call(mut req: Request, env: &Env) -> Result<Response> {
+    let authorized = match authorize(&req, env).await {
+        Ok(a) => a,
+        Err(AuthFailure::Rpc(_, message)) => return rest_error(401, message),
+        Err(AuthFailure::Store) => {
+            return rest_error(
+                503,
+                "Curatom could not verify this key right now. Access is refused until \
+                 the capability store answers.",
+            );
+        }
+    };
+
+    let body = req.text().await?;
+    if body.len() > MAX_BODY_BYTES {
+        return rest_error(400, "Request body exceeds the Curatom gateway limit.");
+    }
+    let parsed: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return rest_error(400, "Invalid JSON body."),
+    };
+    let Some(name) = parsed.get("name").and_then(|v| v.as_str()) else {
+        return rest_error(400, "Missing \"name\" field naming the tool to call.");
+    };
+    let arguments = parsed.get("arguments").cloned().unwrap_or_else(|| json!({}));
+
+    let params = json!({ "name": name, "arguments": arguments });
+    match call_upstream(env, &authorized.key_hash, &authorized.scope, "tools/call", params).await? {
+        Ok(result) => {
+            let mut resp = Response::from_json(&result)?;
+            resp.headers_mut().set("cache-control", "no-store")?;
+            Ok(resp)
+        }
+        Err(err) => {
+            let msg = upstream_error_message(&err);
+            // An unregistered tool on a scoped surface is a 404-shaped fact
+            // about what this key can reach, not a gateway fault. HostOS's
+            // real message is "Tool <name> not found" -- verified live,
+            // not "unknown tool" as first guessed.
+            let lower = msg.to_lowercase();
+            let status = if lower.contains("not found") || lower.contains("unknown tool") { 404 } else { 502 };
+            rest_error(status, msg)
+        }
+    }
 }
