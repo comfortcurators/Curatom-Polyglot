@@ -10,7 +10,7 @@ compatibility_date = "2026-09-01"
 workers_dev = false
 
 [build]
-command = "cd apps/dashboard && npm install && npm run build && cd ../../workers/api && worker-build --release"
+command = "cd apps/dashboard && trunk build --release && cd ../../workers/api && worker-build --release"
 
 [[durable_objects.bindings]]
 name = "CURATOM_KERNEL"
@@ -46,12 +46,14 @@ custom_domain = true
 binding = "CURATOM_ORCHESTRATOR"
 service = "curatom-orchestrator"
 
-# The web dashboard: a Vite + React + Framer Motion SPA (apps/dashboard),
-# not Expo/React Native Web -- it never shipped as a native app, and the
-# swipe/zoom UI needs real CSS transforms and spring physics, not RN's
-# View/StyleSheet abstraction. Same hostname as the API -- one login, one
-# bookmark, no CORS. API paths always go to the Rust worker; everything
-# else is the dashboard, falling back to index.html for client routing.
+# The web dashboard: Rust compiled to WASM via Leptos + Trunk
+# (apps/dashboard), not TypeScript/React -- one language across the whole
+# stack, same as the Rust kernel it talks to. The swipe/zoom UI uses raw
+# pointer events + CSS transforms plus the browser's native View
+# Transition API for the tile<->fullscreen morph, no JS animation library.
+# Same hostname as the API -- one login, one bookmark, no CORS. API paths
+# always go to the Rust worker; everything else is the dashboard, falling
+# back to index.html for client routing.
 [assets]
 directory = "./apps/dashboard/dist"
 binding = "ASSETS"

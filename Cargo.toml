@@ -16,11 +16,15 @@ members = [
 exclude = [
     "workers/api",
     "crates/substrate-cloudflare",
+    "apps/dashboard",
 ]
-# workers/api and crates/substrate-cloudflare are wasm/workers-rs only.
-# They are not workspace members so `cargo test --workspace` stays native.
-# Build the worker with wrangler / cargo check --target wasm32-unknown-unknown
-# from workers/api once the wasm target is installed.
+# workers/api, crates/substrate-cloudflare and apps/dashboard are wasm-only
+# (workers-rs and Leptos respectively, with their own wasm-bindgen version
+# each). They are not workspace members so `cargo test --workspace` stays
+# native, and their independent wasm-bindgen versions never collide in one
+# resolver pass. Build the worker with wrangler / cargo check --target
+# wasm32-unknown-unknown from workers/api; build the dashboard with trunk
+# from apps/dashboard, once the wasm target is installed.
 
 [workspace.package]
 version = "0.1.0"
