@@ -10,7 +10,7 @@ compatibility_date = "2026-09-01"
 workers_dev = false
 
 [build]
-command = "cd workers/api && worker-build --release"
+command = "cd apps/dashboard && npm install && npm run build && cd ../../workers/api && worker-build --release"
 
 [[durable_objects.bindings]]
 name = "CURATOM_KERNEL"
@@ -46,11 +46,14 @@ custom_domain = true
 binding = "CURATOM_ORCHESTRATOR"
 service = "curatom-orchestrator"
 
-# The web dashboard. Same hostname as the API -- one login, one bookmark,
-# no CORS. API paths always go to the Rust worker; everything else is the
-# dashboard, falling back to index.html so client-side routing works.
+# The web dashboard: a Vite + React + Framer Motion SPA (apps/dashboard),
+# not Expo/React Native Web -- it never shipped as a native app, and the
+# swipe/zoom UI needs real CSS transforms and spring physics, not RN's
+# View/StyleSheet abstraction. Same hostname as the API -- one login, one
+# bookmark, no CORS. API paths always go to the Rust worker; everything
+# else is the dashboard, falling back to index.html for client routing.
 [assets]
-directory = "./apps/mobile/dist"
+directory = "./apps/dashboard/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health", "/scratch/*"]

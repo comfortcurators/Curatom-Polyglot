@@ -1,7 +1,10 @@
-const BASE = process.env.EXPO_PUBLIC_CURATOM_API ?? "http://localhost:8787";
+// Same-origin by default: curatom-kernel serves this dashboard and the
+// /organic/* API from one hostname, one login, no CORS. VITE_CURATOM_API
+// overrides for local dev against a different origin.
+const BASE = import.meta.env.VITE_CURATOM_API ?? "";
 
 function devHeaders(): Record<string, string> {
-  const id = process.env.EXPO_PUBLIC_DEV_ORGANIC_ID;
+  const id = import.meta.env.VITE_DEV_ORGANIC_ID;
   return id ? { "x-curatom-dev-organic": id } : {};
 }
 
@@ -12,10 +15,7 @@ async function parseBody(text: string): Promise<Record<string, unknown> | unknow
     if (parsed && typeof parsed === "object") return parsed;
     return { __value: parsed };
   } catch {
-    return {
-      __error: "non_json_response",
-      __raw: text.slice(0, 300),
-    };
+    return { __error: "non_json_response", __raw: text.slice(0, 300) };
   }
 }
 
@@ -75,7 +75,7 @@ export type Knock = {
   reason: string;
   resources: string[];
   permissions: string[];
-  duration: any;
+  duration: unknown;
   expires_at: string;
   seconds_remaining: number;
 };
@@ -87,10 +87,9 @@ export async function listKnocks(): Promise<Knock[]> {
 }
 
 export async function approveKnock(knockId: string, turnstileToken: string) {
-  const { status, body } = await jpost(
-    `/organic/knocks/${knockId}/approve`,
-    { turnstile_token: turnstileToken }
-  );
+  const { status, body } = await jpost(`/organic/knocks/${knockId}/approve`, {
+    turnstile_token: turnstileToken,
+  });
   if (status !== 200) throw new Error(`approve: ${status} ${JSON.stringify(body)}`);
   return body;
 }
@@ -101,7 +100,7 @@ export async function refuseKnock(knockId: string) {
   return body;
 }
 
-export async function activity() {
+export async function activity(): Promise<{ seq: number; at: string; kind: string; actor: string }[]> {
   const { status, body } = await jget("/organic/activity");
   if (status !== 200) throw new Error(`activity: ${status}`);
   return body as { seq: number; at: string; kind: string; actor: string }[];

@@ -46,7 +46,7 @@ crates/           native Rust kernel (this is what `cargo test` runs)
   substrate-cloudflare/   wasm: DO storage, R2, Access, CloudflareClock
 workers/api/      Durable Object, inline routing (borrow-safe)
 orchestrator/     Elixir OTP
-apps/mobile/      Expo, owner mode only
+apps/dashboard/   Vite + React + Framer Motion SPA, owner mode only
 docs/             architecture + the three contracts, verbatim
 ```
 
@@ -60,8 +60,8 @@ cargo test --workspace
 cd orchestrator && mix deps.get && mix test
 # boot: MIX_ENV=dev mix run --no-halt
 
-# Expo against a locally running Worker
-cd apps/mobile && npx expo start
+# Dashboard against a locally running Worker
+cd apps/dashboard && npm install && npm run dev
 ```
 
 `CURATOM_ENV=development` makes the Worker accept `x-curatom-dev-organic`.
