@@ -8,7 +8,7 @@ workers_dev = false
 [[containers]]
 class_name = "OrchestratorContainer"
 image = "../../orchestrator/Dockerfile"
-instance_type = "basic"
+instance_type = "standard-4"
 max_instances = 1
 
 [[durable_objects.bindings]]
@@ -22,3 +22,7 @@ new_sqlite_classes = ["OrchestratorContainer"]
 [[services]]
 binding = "CURATOM_KERNEL_INTERNAL"
 service = "curatom-kernel"
+
+[[services]]
+binding = "HOSTOS_MCP"
+service = "hostos-mcp"
