@@ -309,15 +309,33 @@ fn upstream_error_message(err: &Value) -> String {
         .to_string()
 }
 
-/// JSON-RPC's own code for calling a tool that isn't registered on the
-/// scoped surface -- verified live against hostos-mcp's real response
-/// (`{"code":-32602,"message":"Tool exec not found"}`). This is the MCP
-/// SDK's own dispatch behavior, not HostOS's wording, so it doesn't move
-/// if HostOS ever rephrases the message. Matching on `message` instead
-/// would be the same fragility this gateway exists to avoid: a fact that
-/// lives in a service this Worker can't verify, silently reverting to a
-/// bare 502 the moment the string changes.
-const RPC_UNKNOWN_TOOL: i64 = -32602;
+/// -32602 ("Invalid params") is what hostos-mcp's SDK returns for calling
+/// an unregistered tool -- verified live against a real response
+/// (`{"code":-32602,"message":"Tool exec not found"}`). But it's also
+/// exactly what the same SDK returns for a *registered* tool called with
+/// a malformed argument, since the tool name and its arguments are both
+/// "params" to `tools/call`. The code alone can't tell those apart, so
+/// this gateway doesn't try to infer which one happened from downstream
+/// at all: it holds the real tool list itself (queried fresh below,
+/// never a second hardcoded copy that could drift from it) and checks
+/// membership *before* forwarding. A name outside that list is 404 --
+/// this key cannot reach it, established as a fact this Worker holds,
+/// not inferred from an ambiguous error. A name inside the list that
+/// still comes back -32602 is a bad-argument error on a tool the caller
+/// does have, and is reported as 400.
+const RPC_INVALID_PARAMS: i64 = -32602;
+
+fn extract_tool_names(tools_list_result: &Value) -> Vec<String> {
+    tools_list_result
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 pub async fn handle_tools_list(req: Request, env: &Env) -> Result<Response> {
     let authorized = match authorize(&req, env).await {
@@ -368,6 +386,17 @@ pub async fn handle_tools_call(mut req: Request, env: &Env) -> Result<Response> 
     };
     let arguments = parsed.get("arguments").cloned().unwrap_or_else(|| json!({}));
 
+    // Hold the fact rather than infer it from downstream: ask what this
+    // capability's surface actually contains before calling into it, so a
+    // -32602 afterward can only mean a bad argument, never an unknown tool.
+    let known_tools = match call_upstream(env, &authorized.key_hash, &authorized.scope, "tools/list", json!({})).await? {
+        Ok(result) => extract_tool_names(&result),
+        Err(err) => return rest_error(502, upstream_error_message(&err)),
+    };
+    if !known_tools.iter().any(|t| t == name) {
+        return rest_error(404, format!("Tool \"{name}\" is not on this capability's tool surface."));
+    }
+
     let params = json!({ "name": name, "arguments": arguments });
     match call_upstream(env, &authorized.key_hash, &authorized.scope, "tools/call", params).await? {
         Ok(result) => {
@@ -377,11 +406,10 @@ pub async fn handle_tools_call(mut req: Request, env: &Env) -> Result<Response> 
         }
         Err(err) => {
             let msg = upstream_error_message(&err);
-            // An unregistered tool on a scoped surface is a 404-shaped fact
-            // about what this key can reach, not a gateway fault. Matched
-            // on the JSON-RPC code, not the message -- see RPC_UNKNOWN_TOOL.
-            let is_unknown_tool = err.get("code").and_then(|c| c.as_i64()) == Some(RPC_UNKNOWN_TOOL);
-            let status = if is_unknown_tool { 404 } else { 502 };
+            // The name was confirmed on the surface above, so an
+            // Invalid-params error here can only be about the arguments.
+            let is_bad_args = err.get("code").and_then(|c| c.as_i64()) == Some(RPC_INVALID_PARAMS);
+            let status = if is_bad_args { 400 } else { 502 };
             rest_error(status, msg)
         }
     }
