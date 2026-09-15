@@ -654,12 +654,19 @@ impl CuratomKernel {
                    scope = excluded.scope, expires_at = excluded.expires_at, \
                    revoked = 0, knock_id = excluded.knock_id",
             );
+            // D1's bind rejects a JS BigInt outright -- `worker`'s
+            // `From<i64> for JsValue` produces one, since i64 doesn't fit an
+            // f64 losslessly in general. A unix-seconds timestamp does (well
+            // under 2^53), so cast through f64 rather than i64 -> JsValue
+            // directly. Verified live: the raw i64 bind failed with
+            // "D1_TYPE_ERROR: Type 'bigint' not supported" on the very first
+            // real approval this was exercised against.
             let bound = match stmt.bind(&[
                 key_hash.clone().into(),
-                expires_at.into(),
+                (expires_at as f64).into(),
                 knock.name.clone().into(),
                 knock.id.clone().into(),
-                now.into(),
+                (now as f64).into(),
             ]) {
                 Ok(b) => b,
                 Err(e) => return (500, json!({ "error": format!("bind: {e}") })),
