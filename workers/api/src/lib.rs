@@ -578,6 +578,34 @@ impl CuratomKernel {
         (200, json!(out))
     }
 
+    // Intent : Approval state and capability row are one fact, written twice.
+    // Pattern: Comment the invariant here. Do not add a tracker entry for it.
+    // Signed. Claude / 2026-09-15 UTC
+    //
+    // decide_knock() persists Approved and logs knock.approved before this
+    // function ever reaches the capabilities INSERT below. Those are two
+    // separate writes to two separate stores (the DO's own storage, then
+    // D1), not one transaction. Approval is not granted until the capability
+    // row exists -- a knock the operator sees as "approved" with no matching
+    // row is a knock nobody can actually use, and the two states can drift
+    // apart silently unless the second write's failure is surfaced loudly.
+    //
+    // Found this way, not reasoned into it: the first real approval through
+    // this path (D1 bind rejecting an i64 as a JS BigInt -- see the f64 cast
+    // below) left exactly that state. decide_knock had already committed and
+    // logged approved; the D1 write then failed with a 500 the dashboard
+    // didn't surface as anything the operator would notice, and the
+    // capability silently never existed. Every prior test of this function
+    // had inserted the D1 row by hand, so nothing had ever exercised the
+    // real write until an actual human approved an actual knock.
+    //
+    // This comment does not close the race -- the two writes are still two
+    // writes, and a crash between them still leaves the same gap. Closing it
+    // for real is a transaction or a compensating delete on decide_knock's
+    // side; that is a real fix to choose deliberately, not a byproduct of
+    // documenting this. What this fixes is that the failure surfaces (the
+    // caller gets the 500, not a false "approved") and that whoever next
+    // touches this function knows the invariant before they change it.
     async fn h_approve_knock(&self, hr: &HttpRequestDto, knock_id: &str) -> Reply {
         if let Err(r) = self.owner(hr).await {
             return r;
