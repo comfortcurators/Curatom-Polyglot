@@ -2,12 +2,16 @@ name = "curatom-kernel"
 main = "workers/api/build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
-# No *.workers.dev fallback. CloudflareAccessIdentityProvider treats the mere
-# presence of cf-access-jwt-assertion as the owner -- it does not verify the
-# JWT (see DEFERRED.md). That is only safe behind a route Cloudflare Access
-# actually enforces. A live workers.dev URL bypasses Access entirely and lets
-# anyone set that header themselves. Deploy on the custom domain only.
-workers_dev = false
+# workers.dev enabled deliberately, 16 Sep 2026: the founder wants token-only
+# entry (RAJ_TOKEN, ?token= in a plain browser tab) without Cloudflare
+# Access's email/OTP flow in front of it. That's safe now specifically
+# because the Cf-Access-* header-trust branches this comment used to warn
+# about are gone from CloudflareAccessIdentityProvider::authenticate --
+# RAJ_TOKEN and CURATOM_ENV=development's dev header are the only two
+# paths in, and neither is a header Cloudflare happens to pass through
+# unmodified. Re-disabling this without also restoring real JWT
+# verification first would be the old vulnerability again.
+workers_dev = true
 
 [build]
 command = "cd apps/dashboard && trunk build --release && cd ../../workers/api && worker-build --release"
