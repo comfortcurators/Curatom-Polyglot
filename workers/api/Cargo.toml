@@ -30,3 +30,13 @@ curatom-inorganic-router = { path = "../../crates/inorganic-router" }
 curatom-attestation = { path = "../../crates/attestation" }
 curatom-substrate-cloudflare = { path = "../../crates/substrate-cloudflare" }
 curatom-resource-registry = { path = "../../crates/resource-registry" }
+
+# wasm-opt is an optional size/speed optimization pass, not required for
+# correctness. worker-build tries to download the binaryen release on
+# every build; this environment's proxy doesn't trust that download's
+# cert chain (same as the wasm-bindgen download this build already
+# works around via WASM_BINDGEN_BIN). Disabled rather than chasing a
+# second binary override -- unoptimized wasm still runs correctly, just
+# larger. Re-enable if bundle size ever matters enough to fix properly.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
