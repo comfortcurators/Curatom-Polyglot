@@ -111,6 +111,28 @@ impl ArtifactStore for R2ArtifactStore {
 pub struct CloudflareAccessIdentityProvider {
     owner_id: String,
     dev: bool,
+    admin_token: Option<String>,
+}
+
+/// Byte-length-equal-input constant-time comparison. Deliberately not
+/// `==`: a naive comparison short-circuits on the first mismatched
+/// byte, so its timing leaks how many leading bytes of a guess were
+/// correct. RAJ_TOKEN is a real bearer credential, not a debug header
+/// -- same discipline this org already applies to CURA_ORIGIN_SECRET
+/// and reek's auth guard.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn bearer_token(hr: &HttpRequestDto) -> Option<&str> {
+    hr.header("authorization")?.strip_prefix("Bearer ")
 }
 
 impl CloudflareAccessIdentityProvider {
@@ -119,10 +141,31 @@ impl CloudflareAccessIdentityProvider {
             .var("CURATOM_ENV")
             .map(|v| v.to_string() == "development")
             .unwrap_or(false);
-        Ok(Self { owner_id, dev })
+        // Absent until the founder sets it (`wrangler secret put RAJ_TOKEN`).
+        // Not present is not an error -- this path is simply unavailable
+        // until the secret exists, same as any other optional Worker secret.
+        let admin_token = env.secret("RAJ_TOKEN").ok().map(|s| s.to_string());
+        Ok(Self { owner_id, dev, admin_token })
     }
 
     pub async fn authenticate(&self, hr: &HttpRequestDto) -> Result<Option<Identity>, String> {
+        // Admin break-glass: a bearer token matching the RAJ_TOKEN Worker
+        // secret authenticates as owner, independent of Cloudflare Access
+        // entirely -- the whole point is a path in that doesn't depend on
+        // the Access/JWKS verification this file already defers (see
+        // DEFERRED.md). Checked first because it's the strongest, most
+        // explicit credential of the three checked here.
+        if let Some(expected) = &self.admin_token {
+            if let Some(presented) = bearer_token(hr) {
+                if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+                    return Ok(Some(Identity {
+                        id: self.owner_id.clone(),
+                        kind: IdentityKind::Organic,
+                    }));
+                }
+            }
+        }
+
         if self.dev {
             if let Some(id) = hr.header("x-curatom-dev-organic") {
                 return Ok(Some(Identity {
