@@ -29,7 +29,7 @@ use curatom_protocol::{
 };
 use curatom_substrate_cloudflare::{
     to_dto, CloudflareAccessIdentityProvider, CloudflareClock, DOEventLedger, DOStateStore,
-    ProductionCloudflareInorganicIdentityProvider, R2ArtifactStore,
+    ProductionCloudflareInorganicIdentityProvider, R2ArtifactStore, SESSION_COOKIE_NAME,
 };
 use curatom_ports::Clock;
 
@@ -207,7 +207,29 @@ impl DurableObject for CuratomKernel {
             _ => (404, json!({ "error": "not_found" })),
         };
 
-        json_response(status, body)
+        let resp = json_response(status, body)?;
+
+        // First visit proves itself with ?token=; every visit after
+        // that rides the cookie instead -- the founder shouldn't have
+        // to paste the token into every URL by hand. Only set it when
+        // the query token is what actually authenticated this request
+        // (not the cookie itself), so a session that's already running
+        // doesn't get an identical cookie re-set on every call.
+        if let Some(idp) = &self.organic_idp {
+            if idp.admin_token_matches_query(&hr) {
+                if let Ok(token) = self.env.secret("RAJ_TOKEN") {
+                    let cookie = format!(
+                        "{SESSION_COOKIE_NAME}={}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax",
+                        token.to_string()
+                    );
+                    let mut resp = resp;
+                    resp.headers_mut().append("Set-Cookie", &cookie)?;
+                    return Ok(resp);
+                }
+            }
+        }
+
+        Ok(resp)
     }
 }
 

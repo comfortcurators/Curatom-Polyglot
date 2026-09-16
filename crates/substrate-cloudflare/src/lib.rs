@@ -148,6 +148,18 @@ fn query_token(hr: &HttpRequestDto) -> Option<&str> {
     })
 }
 
+pub const SESSION_COOKIE_NAME: &str = "raj_session";
+
+/// The session cookie the top-level fetch handler sets after a
+/// successful ?token= visit, so every visit after the first doesn't
+/// need the query string -- same secret, just found in a second place.
+fn session_cookie(hr: &HttpRequestDto) -> Option<&str> {
+    hr.header("cookie")?.split(';').find_map(|pair| {
+        let (k, v) = pair.trim().split_once('=')?;
+        (k == SESSION_COOKIE_NAME).then_some(v)
+    })
+}
+
 impl CloudflareAccessIdentityProvider {
     pub fn new(env: &worker::Env, owner_id: String) -> Result<Self, worker::Error> {
         let dev = env
@@ -161,6 +173,20 @@ impl CloudflareAccessIdentityProvider {
         Ok(Self { owner_id, dev, admin_token })
     }
 
+    /// True when this request's `?token=` (not the cookie, not the
+    /// header) is the live RAJ_TOKEN -- the signal the top-level fetch
+    /// handler uses to decide whether to set the session cookie, so a
+    /// visit that already succeeded via the cookie doesn't re-set an
+    /// identical one on every request.
+    pub fn admin_token_matches_query(&self, hr: &HttpRequestDto) -> bool {
+        match (&self.admin_token, query_token(hr)) {
+            (Some(expected), Some(presented)) => {
+                constant_time_eq(presented.as_bytes(), expected.as_bytes())
+            }
+            _ => false,
+        }
+    }
+
     pub async fn authenticate(&self, hr: &HttpRequestDto) -> Result<Option<Identity>, String> {
         // Admin break-glass: a bearer token matching the RAJ_TOKEN Worker
         // secret authenticates as owner, independent of Cloudflare Access
@@ -169,7 +195,9 @@ impl CloudflareAccessIdentityProvider {
         // DEFERRED.md). Checked first because it's the strongest, most
         // explicit credential of the three checked here.
         if let Some(expected) = &self.admin_token {
-            let presented = bearer_token(hr).or_else(|| query_token(hr));
+            let presented = bearer_token(hr)
+                .or_else(|| query_token(hr))
+                .or_else(|| session_cookie(hr));
             if let Some(presented) = presented {
                 if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
                     return Ok(Some(Identity {
