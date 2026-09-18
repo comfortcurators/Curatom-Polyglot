@@ -264,10 +264,17 @@ pub async fn frozen_list() -> ApiResult<Vec<Frozen>> {
 #[derive(Serialize)]
 struct RegisterBody<'a> {
     email: &'a str,
+    password: &'a str,
 }
 
-pub async fn register(email: &str) -> ApiResult<()> {
-    let _: serde_json::Value = post("/auth/register", &RegisterBody { email }, 202).await?;
+/// `password` is chosen here, not minted after verification -- see
+/// `auth_users.rs`'s header for why: a password minted on the verify
+/// link's GET response is a secret handed to whichever request follows
+/// that link first, and mail providers' own link scanners fetch it
+/// before a human ever can.
+pub async fn register(email: &str, password: &str) -> ApiResult<()> {
+    let _: serde_json::Value =
+        post("/auth/register", &RegisterBody { email, password }, 202).await?;
     Ok(())
 }
 

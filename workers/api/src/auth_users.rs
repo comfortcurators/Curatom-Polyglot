@@ -1,14 +1,28 @@
 /*
-Intent : Register with an email, verify it, and Curatom hands you your own username and password.
-Pattern: POST /auth/register {email}, follow the ZeptoMail link, read the minted credentials back once.
+Intent : Register with an email + a password you chose; the verify link only activates the account.
+Pattern: POST /auth/register {email,password}, follow the ZeptoMail link -- hit it twice and it's still fine.
 Signed. Claude / 2026-09-18 UTC
 
-The founder's own workflow sketch, followed step for step: go to
-curatom.rajvansh.dev, register via email (ZeptoMail verification), get
-your own username and password. Nobody types a password in at signup --
-the system mints one, the same mint-once, show-once shape every other
-credential in this org already uses (organic tokens, capability keys,
-business_register's keys). `mail.rs` sends the one email this needs.
+Corrected 2026-09-18. The previous shape of this file minted the
+password on the verify GET and showed it exactly once, in that
+response. That put a real secret behind a race: mail providers' link
+scanners (Microsoft Safe Links and equivalents at Google, Yahoo, Zoho)
+prefetch every URL in an inbound email before a human ever clicks it,
+which is itself a GET -- so the scanner won the race, the account was
+minted with a password nobody but the scanner ever saw, and the actual
+person got "unknown_or_used_token" on a link already burned out from
+under them. Confirmed live: `yashrajvansh@hotmail.com` hit exactly this
+on first registration.
+
+The fix removes the secret from that path rather than trying to referee
+who gets there first. The password is chosen at registration -- the
+same request that claims the email -- hashed immediately, and carried
+on the `pending_verifications` row. `handle_verify` no longer creates or
+reveals a credential; it only flips a pending claim into a real account,
+which is safe to run twice. Whichever request gets there first (scanner
+or human) completes the same account creation; the second is a no-op
+that reads as success ("already verified, sign in"), not an error --
+there is nothing left in that response worth winning a race for.
 
 Additive, still: this does not touch RAJ_TOKEN or
 CloudflareAccessIdentityProvider. What it does reach, past this file, is
@@ -18,10 +32,7 @@ now resolves to its own CuratomKernel instance, not the founder's.
 
 use worker::*;
 
-use curatom_crypto::{
-    hash_password, random_id, random_readable_secret, random_salt_hex, random_token_hex,
-    sha256_hex, verify_password,
-};
+use curatom_crypto::{hash_password, random_id, random_salt_hex, random_token_hex, sha256_hex, verify_password};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -32,12 +43,14 @@ pub const USER_SESSION_COOKIE: &str = "curatom_user_session";
 const SESSION_TTL_SECONDS: i64 = 30 * 24 * 60 * 60; // 30 days, same as the RAJ_TOKEN cookie.
 const VERIFICATION_TTL_SECONDS: i64 = 30 * 60; // matches the wording in the email itself.
 const MAX_EMAIL_LEN: usize = 254;
-const MINTED_PASSWORD_LEN: usize = 20;
+const MIN_PASSWORD_LEN: usize = 8;
 
 #[derive(Deserialize)]
 struct RegisterBody {
     #[serde(default)]
     email: String,
+    #[serde(default)]
+    password: String,
 }
 
 #[derive(Deserialize)]
@@ -251,8 +264,12 @@ pub async fn resolve_user_session(req: &Request, env: &Env) -> Result<Option<(St
     resolve_user_session_from_cookie(cookie_header.as_deref(), env).await
 }
 
-/// Step 1: claim an email address. No account exists yet -- only a
-/// `pending_verifications` row and a sent email.
+/// Step 1: claim an email address and choose a password. No account
+/// exists yet -- only a `pending_verifications` row (password already
+/// hashed) and a sent email. The password never appears in any response
+/// this file sends; it was typed by the person who is about to read
+/// their own email, not minted and handed to whichever request follows
+/// the link first.
 pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
     let Some(body) = read_json::<RegisterBody>(&mut req).await else {
         return json_response(400, json!({ "error": "malformed_body" }));
@@ -260,23 +277,45 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
     let Some(email) = normalize_email(&body.email) else {
         return json_response(400, json!({ "error": "invalid_email" }));
     };
+    if body.password.len() < MIN_PASSWORD_LEN {
+        return json_response(400, json!({ "error": "password_too_short", "min_length": MIN_PASSWORD_LEN }));
+    }
 
     if email_is_registered(env, &email).await? {
         return json_response(409, json!({ "error": "email_already_registered" }));
     }
 
+    let salt = random_salt_hex();
+    let password_hash = hash_password(&body.password, &salt);
+
     let token = random_token_hex();
     let hash = sha256_hex(token.as_bytes());
     let now = now_unix();
     let db = env.d1("CURATOM_LEDGER")?;
+
+    // `handle_verify` deliberately stops deleting a pending row the
+    // moment it's used, so that a second hit of the same link (a mail
+    // scanner's prefetch, then the real click) reads back as "already
+    // verified" instead of "unknown token". Nothing else clears these
+    // rows out, so this is the sweep: on every registration, reap
+    // whatever has aged past its own `expires_at`, used or not. A
+    // best-effort delete, not a transaction -- worst case a row survives
+    // one extra registration cycle, which costs nothing.
+    db.prepare("DELETE FROM pending_verifications WHERE expires_at < ?1")
+        .bind(&[(now as f64).into()])?
+        .run()
+        .await?;
+
     db.prepare(
-        "INSERT OR REPLACE INTO pending_verifications (token_hash, email, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT OR REPLACE INTO pending_verifications (token_hash, email, created_at, expires_at, password_hash, password_salt) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(&[
         hash.into(),
         email.clone().into(),
         (now as f64).into(),
         ((now + VERIFICATION_TTL_SECONDS) as f64).into(),
+        password_hash.into(),
+        salt.into(),
     ])?
     .run()
     .await?;
@@ -297,9 +336,12 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
     }
 }
 
-/// Step 2: the ZeptoMail link lands here. Mints the account -- username,
-/// password, session -- and shows the password exactly once, in this
-/// response body. Nothing after this request will ever display it again.
+/// Step 2: the ZeptoMail link lands here. Activates the account with
+/// the password chosen at registration -- nothing is minted and nothing
+/// secret is in this response, so hitting this twice (a mail scanner's
+/// prefetch, then the person's real click) is harmless: the first
+/// request creates the account, the second reads it back as already
+/// done rather than failing.
 pub async fn handle_verify(req: Request, env: &Env) -> Result<Response> {
     let url = req.url()?;
     let Some(token) = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned()) else {
@@ -312,33 +354,47 @@ pub async fn handle_verify(req: Request, env: &Env) -> Result<Response> {
     struct PendingRow {
         email: String,
         expires_at: i64,
+        password_hash: String,
+        password_salt: String,
     }
     let stmt = db
-        .prepare("SELECT email, expires_at FROM pending_verifications WHERE token_hash = ?1 LIMIT 1")
-        .bind(&[hash.clone().into()])?;
+        .prepare("SELECT email, expires_at, password_hash, password_salt FROM pending_verifications WHERE token_hash = ?1 LIMIT 1")
+        .bind(&[hash.into()])?;
     let Some(pending): Option<PendingRow> = stmt.first(None).await? else {
-        return json_response(400, json!({ "error": "unknown_or_used_token" }));
+        // No row at all for this token: it was never issued, or it was
+        // issued and has since aged past `expires_at` and been reaped by
+        // `handle_register`. Either way there is nothing left to tell
+        // this apart from a genuinely bad link, which is the honest
+        // answer here -- the row is kept around (not deleted) on
+        // success specifically so a second hit of a *good* link lands
+        // in the `email_is_registered` branch below instead of here.
+        return json_response(400, json!({ "error": "unknown_or_expired_token" }));
     };
     if now_unix() >= pending.expires_at {
         return json_response(400, json!({ "error": "verification_expired" }));
     }
 
-    // A link followed twice (double-click, a mail client's link
-    // pre-fetch) must not mint two accounts for one email -- check
-    // again, inside this same request, right before writing `users`.
+    // A link followed twice (a mail provider's link-scanner prefetch,
+    // then the person's real click -- the *same* token both times, since
+    // it's the same link) must not mint two accounts for one email --
+    // check again, inside this same request, right before writing
+    // `users`. Unlike before, this is not an error: whichever request
+    // got here first already finished the job, and this one just reads
+    // it back. The pending row is deliberately left in place rather than
+    // deleted (below, and on the success path past this point) so that
+    // this exact branch is reachable on a second hit -- deleting
+    // eagerly turned the second, harmless hit back into the same
+    // "unknown_or_expired_token" dead end this fix exists to remove.
+    // It ages out on its own via `expires_at`; `handle_register` reaps
+    // expired rows so this table doesn't grow unbounded.
     if email_is_registered(env, &pending.email).await? {
-        let db = env.d1("CURATOM_LEDGER")?;
-        db.prepare("DELETE FROM pending_verifications WHERE token_hash = ?1")
-            .bind(&[hash.into()])?
-            .run()
-            .await?;
-        return json_response(409, json!({ "error": "email_already_registered" }));
+        return json_response(
+            200,
+            json!({ "ok": true, "already_verified": true, "message": "this account is already active -- sign in" }),
+        );
     }
 
     let username = mint_username(env, &pending.email).await?;
-    let password = random_readable_secret(MINTED_PASSWORD_LEN);
-    let salt = random_salt_hex();
-    let password_hash = hash_password(&password, &salt);
     let user_id = random_id("user");
     let now = now_unix();
 
@@ -350,18 +406,19 @@ pub async fn handle_verify(req: Request, env: &Env) -> Result<Response> {
         user_id.clone().into(),
         username.clone().into(),
         pending.email.clone().into(),
-        password_hash.into(),
-        salt.into(),
+        pending.password_hash.into(),
+        pending.password_salt.into(),
         (now as f64).into(),
     ])?
     .run()
     .await?;
 
-    let db = env.d1("CURATOM_LEDGER")?;
-    db.prepare("DELETE FROM pending_verifications WHERE token_hash = ?1")
-        .bind(&[hash.into()])?
-        .run()
-        .await?;
+    // The pending row is left in place -- see the comment above the
+    // `email_is_registered` check for why: a second hit of this same
+    // link (the scanner-then-human case this whole fix is for) needs it
+    // still there to recognize "already done" instead of "unknown
+    // token". It ages out via `expires_at`; `handle_register` reaps
+    // expired rows.
 
     let session_token = create_session(env, &user_id).await?;
     let mut resp = json_response(
@@ -370,10 +427,8 @@ pub async fn handle_verify(req: Request, env: &Env) -> Result<Response> {
             "ok": true,
             "account": {
                 "username": username,
-                "password": password,
                 "email": pending.email,
             },
-            "notice": "this password is shown once -- save it now",
         }),
     )?;
     set_session_cookie(&mut resp, &session_token)?;

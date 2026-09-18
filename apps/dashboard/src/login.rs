@@ -23,6 +23,7 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
     let username_or_email = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
     let register_email = RwSignal::new(String::new());
+    let register_password = RwSignal::new(String::new());
     let turnstile_token = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -82,8 +83,13 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
 
     let do_register = move || {
         let email = register_email.get();
+        let password = register_password.get();
         if email.trim().is_empty() {
             error.set(Some("Enter your email.".into()));
+            return;
+        }
+        if password.len() < 8 {
+            error.set(Some("Password must be at least 8 characters.".into()));
             return;
         }
         let Some(_) = turnstile_token.get() else {
@@ -93,7 +99,7 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            match api::register(&email).await {
+            match api::register(&email, &password).await {
                 Ok(()) => {
                     mode.set(Mode::CheckEmail);
                     busy.set(false);
@@ -157,14 +163,21 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
             <Show when=move || mode.get() == Mode::Register>
                 <div style="display:flex;flex-direction:column;gap:10px">
                     <p class="dim" style="font-size:14px;line-height:1.6;margin:0 0 4px">
-                        "Register with your email. Curatom sends a verification link -- "
-                        "follow it, and your username and password are minted for you, shown once."
+                        "Choose your password now. Curatom sends a verification link -- "
+                        "follow it to activate your account; your username is minted from your email."
                     </p>
                     <input
                         class="input"
                         placeholder="Email"
                         prop:value=move || register_email.get()
                         on:input=move |ev| register_email.set(event_target_value(&ev))
+                    />
+                    <input
+                        class="input"
+                        type="password"
+                        placeholder="Password (min 8 characters)"
+                        prop:value=move || register_password.get()
+                        on:input=move |ev| register_password.set(event_target_value(&ev))
                     />
                     <TurnstileGate on_token=Callback::new(move |t| turnstile_token.set(Some(t))) />
                     <button class="btn" style="padding:14px" disabled=move || busy.get() on:click=move |_| do_register()>
@@ -186,7 +199,8 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                     <p style="font-size:16px;font-weight:600;margin:0 0 10px">"Check your email"</p>
                     <p class="dim" style="font-size:14px;line-height:1.6;margin:0">
                         "Follow the link we sent to "<strong>{move || register_email.get()}</strong>
-                        " to finish setting up your account. The link expires in 30 minutes."
+                        " to activate your account. Sign in with the password you just chose. "
+                        "The link expires in 30 minutes."
                     </p>
                 </div>
                 <button
@@ -214,6 +228,8 @@ fn readable_register_error(raw: &str) -> String {
         "An account already exists for that email. Try signing in instead.".into()
     } else if raw.contains("invalid_email") {
         "That doesn't look like a real email address.".into()
+    } else if raw.contains("password_too_short") {
+        "Password must be at least 8 characters.".into()
     } else if raw.contains("email_not_configured") || raw.contains("email_send_failed") {
         "Could not send the verification email. Try again shortly.".into()
     } else {
