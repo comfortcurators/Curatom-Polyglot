@@ -231,6 +231,9 @@ input {
 .vt-plate-activity {
   view-transition-name: plate-activity;
 }
+.vt-plate-account {
+  view-transition-name: plate-account;
+}
 
 /* --- plate panel (fullscreen) --- */
 

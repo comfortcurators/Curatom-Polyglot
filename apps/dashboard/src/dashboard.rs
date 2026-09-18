@@ -7,6 +7,7 @@ use web_sys::PointerEvent;
 
 use crate::api;
 use crate::counts::use_counts;
+use crate::plate_account::AccountPlate;
 use crate::plate_activity::ActivityPlate;
 use crate::plate_billboard::BillboardPlate;
 use crate::plate_keys::KeysPlate;
@@ -186,6 +187,7 @@ fn PlateFullscreen(plate: PlateId, on_close: Callback<()>) -> impl IntoView {
                 PlateId::Valhalla => view! { <ValhallaPlate /> }.into_any(),
                 PlateId::Billboard => view! { <BillboardPlate /> }.into_any(),
                 PlateId::Activity => view! { <ActivityPlate /> }.into_any(),
+                PlateId::Account => view! { <AccountPlate /> }.into_any(),
             }}
         </div>
     }
