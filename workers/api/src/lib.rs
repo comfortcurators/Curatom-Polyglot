@@ -75,6 +75,18 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.path() == "/auth/me" && req.method() == Method::Get {
         return auth_users::handle_me(req, &env).await;
     }
+    if req.path() == "/auth/password/change" && req.method() == Method::Post {
+        return auth_users::handle_change_password(req, &env).await;
+    }
+    // Forgot password: no session needed to start (that's the point --
+    // you're locked out), a real single-use token to finish. Neither leg
+    // mutates on a GET; see the header comment on these two handlers.
+    if req.path() == "/auth/password/reset/begin" && req.method() == Method::Post {
+        return auth_users::handle_password_reset_begin(req, &env).await;
+    }
+    if req.path() == "/auth/password/reset/confirm" && req.method() == Method::Post {
+        return auth_users::handle_password_reset_confirm(req, &env).await;
+    }
     // Passkeys. Registering one requires an existing session (you add a
     // passkey to an account you're already in); logging in with one does
     // not, since the whole point is arriving with no password.
@@ -92,6 +104,10 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
     if req.path() == "/auth/passkey/list" && req.method() == Method::Get {
         return passkey::handle_list(req, &env).await;
+    }
+    if req.path().starts_with("/auth/passkey/") && req.method() == Method::Delete {
+        let credential_id = req.path().trim_start_matches("/auth/passkey/").to_string();
+        return passkey::handle_delete(req, &env, &credential_id).await;
     }
 
     // Which CuratomKernel instance this request reaches. A verified

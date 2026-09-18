@@ -302,8 +302,8 @@ pub async fn logout() -> ApiResult<()> {
 pub struct AuthUser {
     #[allow(dead_code)]
     pub id: String,
-    #[allow(dead_code)]
     pub username: String,
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -318,6 +318,48 @@ struct AuthMeResponse {
 pub async fn auth_me() -> ApiResult<AuthUser> {
     let resp: AuthMeResponse = get("/auth/me").await?;
     Ok(resp.user)
+}
+
+#[derive(Serialize)]
+struct ChangePasswordBody<'a> {
+    current_password: &'a str,
+    new_password: &'a str,
+}
+
+pub async fn change_password(current_password: &str, new_password: &str) -> ApiResult<()> {
+    let _: serde_json::Value = post(
+        "/auth/password/change",
+        &ChangePasswordBody { current_password, new_password },
+        200,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ResetBeginBody<'a> {
+    email: &'a str,
+}
+
+pub async fn password_reset_begin(email: &str) -> ApiResult<()> {
+    let _: serde_json::Value = post("/auth/password/reset/begin", &ResetBeginBody { email }, 202).await?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ResetConfirmBody<'a> {
+    token: &'a str,
+    new_password: &'a str,
+}
+
+pub async fn password_reset_confirm(token: &str, new_password: &str) -> ApiResult<()> {
+    let _: serde_json::Value = post(
+        "/auth/password/reset/confirm",
+        &ResetConfirmBody { token, new_password },
+        200,
+    )
+    .await?;
+    Ok(())
 }
 
 // ---- passkeys ----
@@ -403,7 +445,6 @@ pub async fn passkey_login_finish(
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PasskeyInfo {
-    #[allow(dead_code)]
     pub credential_id: String,
     pub label: Option<String>,
     #[allow(dead_code)]
@@ -419,6 +460,22 @@ struct PasskeyListResponse {
 pub async fn list_passkeys() -> ApiResult<Vec<PasskeyInfo>> {
     let resp: PasskeyListResponse = get("/auth/passkey/list").await?;
     Ok(resp.passkeys)
+}
+
+pub async fn delete_passkey(credential_id: &str) -> ApiResult<()> {
+    let resp = Request::delete(&format!(
+        "/auth/passkey/{}",
+        js_sys::encode_uri_component(credential_id)
+    ))
+    .send()
+    .await
+    .map_err(|e| ApiError(format!("delete_passkey: {e}")))?;
+    let status = resp.status();
+    if status != 200 {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(ApiError(format!("delete_passkey: {status} {text}")));
+    }
+    Ok(())
 }
 
 /// Like `post_empty`, but returns the parsed body -- the two `.../begin`

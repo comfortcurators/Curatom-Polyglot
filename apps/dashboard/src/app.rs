@@ -5,6 +5,18 @@ use crate::api;
 use crate::dashboard::Dashboard;
 use crate::enrollment::Enrollment;
 use crate::login::Login;
+use crate::reset_password::ResetPassword;
+
+/// The token from `?reset_token=...` on the current URL, if the emailed
+/// reset link is what loaded this page. Read once, at module scope
+/// rather than per-render, since it describes how this page load
+/// started, not something that changes while the app runs.
+fn reset_token_from_url() -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    web_sys::UrlSearchParams::new_with_str(&search)
+        .ok()?
+        .get("reset_token")
+}
 
 #[derive(Clone)]
 enum Boot {
@@ -24,6 +36,7 @@ enum Boot {
 
 #[component]
 pub fn App() -> impl IntoView {
+    let reset_token = RwSignal::new(reset_token_from_url());
     let boot = RwSignal::new(Boot::Loading);
 
     let refresh_me = move || {
@@ -50,27 +63,51 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div style="height:100vh">
-            {move || match boot.get() {
-                Boot::Error(err) => view! {
-                    <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px">
-                        <p class="err" style="font-weight:700">"Could not reach Curatom."</p>
-                        <p class="dim">{err}</p>
-                        <button class="btn" style="padding:10px 18px" on:click=move |_| refresh_me()>
-                            "RETRY"
-                        </button>
-                    </div>
-                }.into_any(),
-                Boot::SignedOut => view! {
-                    <Login on_signed_in=Callback::new(move |_| refresh_me()) />
-                }.into_any(),
-                Boot::SignedIn(m) => if m.enrolled {
-                    view! { <Dashboard /> }.into_any()
-                } else {
-                    view! { <Enrollment on_enrolled=Callback::new(move |_| refresh_me()) /> }.into_any()
-                },
-                Boot::Loading => view! {
-                    <div style="height:100%;display:flex;align-items:center;justify-content:center">"…"</div>
-                }.into_any(),
+            {move || {
+                if let Some(token) = reset_token.get() {
+                    return view! {
+                        <ResetPassword
+                            token=token
+                            on_done=Callback::new(move |_| {
+                                // The reset just created a session (see
+                                // handle_password_reset_confirm), so the
+                                // next step is the normal signed-in boot,
+                                // not another sign-in form. Clearing the
+                                // query param stops a page refresh from
+                                // replaying an already-spent token.
+                                if let Some(win) = web_sys::window() {
+                                    let _ = win.history().and_then(|h| {
+                                        h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/"))
+                                    });
+                                }
+                                reset_token.set(None);
+                                refresh_me();
+                            })
+                        />
+                    }.into_any();
+                }
+                match boot.get() {
+                    Boot::Error(err) => view! {
+                        <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px">
+                            <p class="err" style="font-weight:700">"Could not reach Curatom."</p>
+                            <p class="dim">{err}</p>
+                            <button class="btn" style="padding:10px 18px" on:click=move |_| refresh_me()>
+                                "RETRY"
+                            </button>
+                        </div>
+                    }.into_any(),
+                    Boot::SignedOut => view! {
+                        <Login on_signed_in=Callback::new(move |_| refresh_me()) />
+                    }.into_any(),
+                    Boot::SignedIn(m) => if m.enrolled {
+                        view! { <Dashboard /> }.into_any()
+                    } else {
+                        view! { <Enrollment on_enrolled=Callback::new(move |_| refresh_me()) /> }.into_any()
+                    },
+                    Boot::Loading => view! {
+                        <div style="height:100%;display:flex;align-items:center;justify-content:center">"…"</div>
+                    }.into_any(),
+                }
             }}
         </div>
     }

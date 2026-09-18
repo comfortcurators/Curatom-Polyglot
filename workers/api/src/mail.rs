@@ -31,17 +31,33 @@ pub enum MailError {
 /// purpose: registration should fail loudly and immediately if mail
 /// cannot go out, not silently mint an account nobody can verify.
 pub async fn send_verification_email(env: &Env, to: &str, verify_url: &str) -> std::result::Result<(), MailError> {
-    let token = env
-        .secret("ZEPTO_TOKEN")
-        .map_err(|_| MailError::NotConfigured)?
-        .to_string();
-
-    let subject = "Verify your Curatom account";
     let html = format!(
         "<p>Confirm this address to finish registering at Curatom Enterprise.</p>\
          <p><a href=\"{verify_url}\">{verify_url}</a></p>\
          <p>This link expires in 30 minutes. If you didn't request this, ignore it.</p>"
     );
+    send_html_email(env, to, "Verify your Curatom account", &html).await
+}
+
+/// The forgot-password email. Same "fail loudly" discipline as
+/// registration -- a reset that silently didn't send is worse than one
+/// that errors, because the person is locked out either way and only
+/// one of those tells them.
+pub async fn send_password_reset_email(env: &Env, to: &str, reset_url: &str) -> std::result::Result<(), MailError> {
+    let html = format!(
+        "<p>Reset your Curatom password.</p>\
+         <p><a href=\"{reset_url}\">{reset_url}</a></p>\
+         <p>This link expires in 30 minutes. If you didn't request this, ignore it -- \
+         your password hasn't changed.</p>"
+    );
+    send_html_email(env, to, "Reset your Curatom password", &html).await
+}
+
+async fn send_html_email(env: &Env, to: &str, subject: &str, html: &str) -> std::result::Result<(), MailError> {
+    let token = env
+        .secret("ZEPTO_TOKEN")
+        .map_err(|_| MailError::NotConfigured)?
+        .to_string();
 
     let body = serde_json::json!({
         "from": { "address": from_address(env) },

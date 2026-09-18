@@ -15,6 +15,8 @@ enum Mode {
     SignIn,
     Register,
     CheckEmail,
+    ForgotPassword,
+    ResetSent,
 }
 
 #[component]
@@ -24,6 +26,7 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
     let password = RwSignal::new(String::new());
     let register_email = RwSignal::new(String::new());
     let register_password = RwSignal::new(String::new());
+    let forgot_email = RwSignal::new(String::new());
     let turnstile_token = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -112,6 +115,25 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
         });
     };
 
+    let do_forgot_password = move || {
+        let email = forgot_email.get();
+        if email.trim().is_empty() {
+            error.set(Some("Enter your email.".into()));
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            // Always succeeds from the caller's point of view -- the
+            // Worker answers the same way whether or not the email is
+            // registered, so this can't be used to find out who has an
+            // account here.
+            let _ = api::password_reset_begin(&email).await;
+            mode.set(Mode::ResetSent);
+            busy.set(false);
+        });
+    };
+
     view! {
         <div style="height:100%;display:flex;flex-direction:column;justify-content:center;padding:24px;max-width:420px;margin:0 auto">
             <h1 style="font-size:26px;font-weight:700;margin:0 0 6px;letter-spacing:0.02em">"CURATOM ENTERPRISE"</h1>
@@ -141,6 +163,14 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                     />
                     <button class="btn" style="padding:14px" disabled=move || busy.get() on:click=move |_| do_login()>
                         {move || if busy.get() { "…" } else { "SIGN IN" }}
+                    </button>
+                    <button
+                        class="btn-ghost"
+                        style="padding:8px;font-size:13px"
+                        disabled=move || busy.get()
+                        on:click=move |_| { error.set(None); mode.set(Mode::ForgotPassword); }
+                    >
+                        "Forgot password?"
                     </button>
 
                     <Show when=move || passkey_supported.get()>
@@ -201,6 +231,49 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                         "Follow the link we sent to "<strong>{move || register_email.get()}</strong>
                         " to activate your account. Sign in with the password you just chose. "
                         "The link expires in 30 minutes."
+                    </p>
+                </div>
+                <button
+                    class="btn-ghost"
+                    style="padding:14px;margin-top:14px"
+                    on:click=move |_| { error.set(None); mode.set(Mode::SignIn); }
+                >
+                    "BACK TO SIGN IN"
+                </button>
+            </Show>
+
+            <Show when=move || mode.get() == Mode::ForgotPassword>
+                <div style="display:flex;flex-direction:column;gap:10px">
+                    <p class="dim" style="font-size:14px;line-height:1.6;margin:0 0 4px">
+                        "Enter your email. If it's registered, we'll send a link to set a new password."
+                    </p>
+                    <input
+                        class="input"
+                        placeholder="Email"
+                        prop:value=move || forgot_email.get()
+                        on:input=move |ev| forgot_email.set(event_target_value(&ev))
+                        on:keydown=move |ev| { if ev.key() == "Enter" { do_forgot_password(); } }
+                    />
+                    <button class="btn" style="padding:14px" disabled=move || busy.get() on:click=move |_| do_forgot_password()>
+                        {move || if busy.get() { "…" } else { "SEND RESET LINK" }}
+                    </button>
+                    <button
+                        class="btn-ghost"
+                        style="padding:14px"
+                        disabled=move || busy.get()
+                        on:click=move |_| { error.set(None); mode.set(Mode::SignIn); }
+                    >
+                        "BACK TO SIGN IN"
+                    </button>
+                </div>
+            </Show>
+
+            <Show when=move || mode.get() == Mode::ResetSent>
+                <div class="card" style="text-align:center;padding:28px 20px">
+                    <p style="font-size:16px;font-weight:600;margin:0 0 10px">"Check your email"</p>
+                    <p class="dim" style="font-size:14px;line-height:1.6;margin:0">
+                        "If " <strong>{move || forgot_email.get()}</strong> " is registered, "
+                        "a reset link is on its way. It expires in 30 minutes."
                     </p>
                 </div>
                 <button

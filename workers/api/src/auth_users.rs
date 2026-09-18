@@ -37,7 +37,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::json_response;
-use crate::mail::{send_verification_email, MailError};
+use crate::mail::{send_password_reset_email, send_verification_email, MailError};
 
 pub const USER_SESSION_COOKIE: &str = "curatom_user_session";
 const SESSION_TTL_SECONDS: i64 = 30 * 24 * 60 * 60; // 30 days, same as the RAJ_TOKEN cookie.
@@ -492,8 +492,201 @@ pub async fn handle_logout(req: Request, env: &Env) -> Result<Response> {
 }
 
 pub async fn handle_me(req: Request, env: &Env) -> Result<Response> {
-    match resolve_user_session(&req, env).await? {
-        Some((id, username)) => json_response(200, json!({ "ok": true, "user": { "id": id, "username": username } })),
-        None => json_response(401, json!({ "error": "unauthenticated" })),
+    let Some((id, username)) = resolve_user_session(&req, env).await? else {
+        return json_response(401, json!({ "error": "unauthenticated" }));
+    };
+    let db = env.d1("CURATOM_LEDGER")?;
+    #[derive(Deserialize)]
+    struct EmailRow {
+        email: String,
     }
+    let email: Option<EmailRow> = db
+        .prepare("SELECT email FROM users WHERE id = ?1 LIMIT 1")
+        .bind(&[id.clone().into()])?
+        .first(None)
+        .await?;
+    json_response(
+        200,
+        json!({
+            "ok": true,
+            "user": {
+                "id": id,
+                "username": username,
+                "email": email.map(|e| e.email),
+            },
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordBody {
+    #[serde(default)]
+    current_password: String,
+    #[serde(default)]
+    new_password: String,
+}
+
+/// Requires the current password, the same as any account's password
+/// change should -- a stolen session cookie alone must not be enough to
+/// lock the real owner out by rotating the password under them.
+pub async fn handle_change_password(mut req: Request, env: &Env) -> Result<Response> {
+    let Some((user_id, _)) = resolve_user_session(&req, env).await? else {
+        return json_response(401, json!({ "error": "unauthenticated" }));
+    };
+    let Some(body) = read_json::<ChangePasswordBody>(&mut req).await else {
+        return json_response(400, json!({ "error": "malformed_body" }));
+    };
+    if body.new_password.len() < MIN_PASSWORD_LEN {
+        return json_response(400, json!({ "error": "password_too_short", "min_length": MIN_PASSWORD_LEN }));
+    }
+
+    let db = env.d1("CURATOM_LEDGER")?;
+    #[derive(Deserialize)]
+    struct Row {
+        password_hash: String,
+        password_salt: String,
+    }
+    let stmt = db
+        .prepare("SELECT password_hash, password_salt FROM users WHERE id = ?1 LIMIT 1")
+        .bind(&[user_id.clone().into()])?;
+    let Some(row): Option<Row> = stmt.first(None).await? else {
+        return json_response(401, json!({ "error": "unauthenticated" }));
+    };
+    if !verify_password(&body.current_password, &row.password_salt, &row.password_hash) {
+        return json_response(401, json!({ "error": "current_password_incorrect" }));
+    }
+
+    let salt = random_salt_hex();
+    let password_hash = hash_password(&body.new_password, &salt);
+    let db = env.d1("CURATOM_LEDGER")?;
+    db.prepare("UPDATE users SET password_hash = ?1, password_salt = ?2 WHERE id = ?3")
+        .bind(&[password_hash.into(), salt.into(), user_id.into()])?
+        .run()
+        .await?;
+
+    json_response(200, json!({ "ok": true }))
+}
+
+// ---- forgot password: no session required to start, a real token to finish ----
+//
+// Same shape as email verification, on purpose: a token is minted,
+// hashed, stored with a short TTL, and the plaintext exists only in the
+// one email that carries it. The confirm step is a POST that carries
+// both the token and the new password together -- unlike the old
+// verify-link bug earlier in this file's history, there is nothing here
+// for a mail scanner's GET prefetch to burn, because nothing mutates on
+// a GET at all.
+
+#[derive(Deserialize)]
+struct ResetBeginBody {
+    #[serde(default)]
+    email: String,
+}
+
+/// Always answers the same way whether or not the email is registered --
+/// telling them apart would let this endpoint be used to enumerate
+/// accounts. The email only goes out when there is somewhere to send it.
+pub async fn handle_password_reset_begin(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(body) = read_json::<ResetBeginBody>(&mut req).await else {
+        return json_response(400, json!({ "error": "malformed_body" }));
+    };
+    let Some(email) = normalize_email(&body.email) else {
+        return json_response(202, json!({ "ok": true }));
+    };
+
+    let db = env.d1("CURATOM_LEDGER")?;
+    #[derive(Deserialize)]
+    struct Row {
+        id: String,
+    }
+    let user: Option<Row> = db
+        .prepare("SELECT id FROM users WHERE email = ?1 LIMIT 1")
+        .bind(&[email.clone().into()])?
+        .first(None)
+        .await?;
+
+    if let Some(user) = user {
+        let token = random_token_hex();
+        let hash = sha256_hex(token.as_bytes());
+        let now = now_unix();
+        let db = env.d1("CURATOM_LEDGER")?;
+        // Reaped the same opportunistic way pending_verifications is --
+        // see handle_register for why a dedicated sweep isn't needed.
+        db.prepare("DELETE FROM password_resets WHERE expires_at < ?1")
+            .bind(&[(now as f64).into()])?
+            .run()
+            .await?;
+        db.prepare(
+            "INSERT INTO password_resets (token_hash, user_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(&[
+            hash.into(),
+            user.id.into(),
+            (now as f64).into(),
+            ((now + VERIFICATION_TTL_SECONDS) as f64).into(),
+        ])?
+        .run()
+        .await?;
+
+        let reset_url = format!("{}/?reset_token={token}", base_url(&req)?);
+        // Best-effort: a send failure here must not tell the caller
+        // whether the email exists, so it isn't surfaced as an error.
+        let _ = send_password_reset_email(env, &email, &reset_url).await;
+    }
+
+    json_response(202, json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct ResetConfirmBody {
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    new_password: String,
+}
+
+pub async fn handle_password_reset_confirm(mut req: Request, env: &Env) -> Result<Response> {
+    let Some(body) = read_json::<ResetConfirmBody>(&mut req).await else {
+        return json_response(400, json!({ "error": "malformed_body" }));
+    };
+    if body.new_password.len() < MIN_PASSWORD_LEN {
+        return json_response(400, json!({ "error": "password_too_short", "min_length": MIN_PASSWORD_LEN }));
+    }
+    let hash = sha256_hex(body.token.as_bytes());
+
+    let db = env.d1("CURATOM_LEDGER")?;
+    #[derive(Deserialize)]
+    struct Row {
+        user_id: String,
+        expires_at: i64,
+    }
+    let stmt = db
+        .prepare("SELECT user_id, expires_at FROM password_resets WHERE token_hash = ?1 LIMIT 1")
+        .bind(&[hash.clone().into()])?;
+    let Some(row): Option<Row> = stmt.first(None).await? else {
+        return json_response(400, json!({ "error": "unknown_or_expired_token" }));
+    };
+    // Deleted before anything else, single-use -- unlike the email-verify
+    // link, a reset link has nothing worth reading twice: the second hit
+    // just needs to fail, not fail *helpfully*, since a stranger holding
+    // a stale reset link learning "this token already worked" reveals
+    // nothing useful anyway.
+    let db = env.d1("CURATOM_LEDGER")?;
+    db.prepare("DELETE FROM password_resets WHERE token_hash = ?1")
+        .bind(&[hash.into()])?
+        .run()
+        .await?;
+    if now_unix() >= row.expires_at {
+        return json_response(400, json!({ "error": "token_expired" }));
+    }
+
+    let salt = random_salt_hex();
+    let password_hash = hash_password(&body.new_password, &salt);
+    let db = env.d1("CURATOM_LEDGER")?;
+    db.prepare("UPDATE users SET password_hash = ?1, password_salt = ?2 WHERE id = ?3")
+        .bind(&[password_hash.into(), salt.into(), row.user_id.clone().into()])?
+        .run()
+        .await?;
+
+    create_session_cookie(env, &row.user_id, json!({ "ok": true })).await
 }

@@ -15,6 +15,7 @@ mod plate_keys;
 mod plate_knocks;
 mod plate_valhalla;
 mod plates;
+mod reset_password;
 mod turnstile;
 mod view_transition;
 

@@ -301,3 +301,24 @@ pub async fn handle_list(req: Request, env: &Env) -> Result<Response> {
         .results()?;
     json_response(200, json!({ "passkeys": rows }))
 }
+
+/// Scoped by `user_id` in the `DELETE` itself, not just checked
+/// beforehand -- a credential_id belonging to another account simply
+/// matches zero rows here, the same fail-closed shape as everything
+/// else keyed off a session-derived id in this file.
+pub async fn handle_delete(req: Request, env: &Env, credential_id: &str) -> Result<Response> {
+    let Some((user_id, _)) = auth_users::resolve_user_session(&req, env).await? else {
+        return json_response(401, json!({ "error": "unauthenticated" }));
+    };
+    let db = env.d1("CURATOM_LEDGER")?;
+    let result = db
+        .prepare("DELETE FROM user_passkeys WHERE credential_id = ?1 AND user_id = ?2")
+        .bind(&[credential_id.into(), user_id.into()])?
+        .run()
+        .await?;
+    let changes = result.meta().ok().flatten().and_then(|m| m.changes).unwrap_or(0);
+    if changes == 0 {
+        return json_response(404, json!({ "error": "unknown_passkey" }));
+    }
+    json_response(200, json!({ "ok": true }))
+}
