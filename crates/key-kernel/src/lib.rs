@@ -796,6 +796,177 @@ where
         Ok(result)
     }
 
+    // ---- compute connectors ----
+    //
+    // Curatom ships zero connectors pre-wired to any account, this
+    // owner's included. hostos and hostos-mcp are one founder's own
+    // Cloudflare Workers, reachable to nobody by default -- adding them
+    // here is exactly the same action as any other user adding their
+    // own MCP endpoint: this owner supplies the URL and whatever auth
+    // it needs, same as everyone else, no special-cased identity check
+    // anywhere in this file.
+
+    pub fn list_connectors(&self) -> Vec<Connector> {
+        let mut v: Vec<Connector> = self
+            .st()
+            .map(|s| s.connectors.values().cloned().collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        v
+    }
+
+    pub async fn create_connector(
+        &mut self,
+        name: String,
+        endpoint: String,
+        headers: Vec<ConnectorHeader>,
+    ) -> Result<Connector, String> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("name_required".into());
+        }
+        if name.len() > 80 {
+            return Err("name_too_long".into());
+        }
+        let endpoint = endpoint.trim().to_string();
+        if !(endpoint.starts_with("https://") || endpoint.starts_with("http://")) {
+            return Err("endpoint_must_be_a_url".into());
+        }
+        if endpoint.len() > 2048 {
+            return Err("endpoint_too_long".into());
+        }
+        if headers.len() > 20 {
+            return Err("too_many_headers".into());
+        }
+        for h in &headers {
+            if h.name.trim().is_empty() || h.name.len() > 200 || h.value.len() > 4000 {
+                return Err("bad_header".into());
+            }
+        }
+        let c = Connector {
+            id: random_id("conn"),
+            owner_id: self.owner_id.clone(),
+            name: name.clone(),
+            endpoint,
+            headers,
+            created_at: self.clock.now_iso(),
+        };
+        {
+            let st = self.st_mut()?;
+            st.connectors.insert(c.id.clone(), c.clone());
+        }
+        self.note("connector.created", name, None, None);
+        self.persist().await?;
+        Ok(c)
+    }
+
+    pub async fn delete_connector(&mut self, id: &str) -> Result<(), String> {
+        let name = {
+            let st = self.st_mut()?;
+            match st.connectors.remove(id) {
+                Some(c) => c.name,
+                None => return Err("unknown_connector".into()),
+            }
+        };
+        self.note("connector.deleted", name, None, None);
+        self.persist().await
+    }
+
+    // ---- data: repositories ----
+
+    pub fn list_repositories(&self) -> Vec<Repository> {
+        let mut v: Vec<Repository> = self
+            .st()
+            .map(|s| s.repositories.values().cloned().collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        v
+    }
+
+    pub fn get_repository(&self, id: &str) -> Option<Repository> {
+        self.st().ok()?.repositories.get(id).cloned()
+    }
+
+    pub async fn create_repository(
+        &mut self,
+        name: String,
+        github_token: Option<String>,
+    ) -> Result<Repository, String> {
+        let name = name.trim().to_string();
+        let valid_shape = {
+            let parts: Vec<&str> = name.split('/').collect();
+            parts.len() == 2
+                && !parts[0].is_empty()
+                && !parts[1].is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+        };
+        if !valid_shape {
+            return Err("name_must_be_owner_slash_repo".into());
+        }
+        if self.st()?.repositories.values().any(|r| r.name == name) {
+            return Err("repository_already_added".into());
+        }
+        let r = Repository {
+            id: random_id("repo"),
+            owner_id: self.owner_id.clone(),
+            name: name.clone(),
+            github_token,
+            created_at: self.clock.now_iso(),
+            last_synced_at: None,
+            last_sync_file_count: None,
+            manifest_ref: None,
+        };
+        {
+            let st = self.st_mut()?;
+            st.repositories.insert(r.id.clone(), r.clone());
+        }
+        self.note("repository.added", name, None, None);
+        self.persist().await?;
+        Ok(r)
+    }
+
+    pub async fn delete_repository(&mut self, id: &str) -> Result<(), String> {
+        let name = {
+            let st = self.st_mut()?;
+            match st.repositories.remove(id) {
+                Some(r) => r.name,
+                None => return Err("unknown_repository".into()),
+            }
+        };
+        self.note("repository.removed", name, None, None);
+        self.persist().await
+    }
+
+    /// Called by the Worker after it actually fetches GitHub and writes
+    /// the manifest to R2 -- this crate does no I/O, so the sync itself
+    /// happens in `lib.rs`; this just records that it happened.
+    pub async fn mark_repository_synced(
+        &mut self,
+        id: &str,
+        file_count: usize,
+        manifest_ref: String,
+    ) -> Result<Repository, String> {
+        let synced_at = self.clock.now_iso();
+        let name = {
+            let st = self.st_mut()?;
+            let r = st.repositories.get_mut(id).ok_or_else(|| "unknown_repository".to_string())?;
+            r.last_synced_at = Some(synced_at.clone());
+            r.last_sync_file_count = Some(file_count);
+            r.manifest_ref = Some(manifest_ref);
+            r.name.clone()
+        };
+        self.note(
+            "repository.synced",
+            format!("{name}: {file_count} files"),
+            None,
+            None,
+        );
+        self.persist().await?;
+        Ok(self.get_repository(id).unwrap())
+    }
+
     pub async fn issue_knock_grant(&mut self, knock: &Knock) -> Result<Option<IssuedGrant>, String> {
         if self.st()?.issued.contains(&knock.id) {
             return Ok(None);
@@ -1080,5 +1251,74 @@ mod tests {
             .unwrap_err(),
             "scope_not_granted:valhalla.workspace"
         );
+    }
+
+    #[test]
+    fn connector_header_values_never_round_trip_by_accident() {
+        // Not a real assertion of secrecy (JSON serialization of Connector
+        // does include the value -- the dashboard's own view redacts it,
+        // see plate_compute.rs). This is the create/list/delete contract:
+        // a header survives storage, and deleting a connector is real.
+        let mut k = k(1_700_000_000);
+        let c = pollster::block_on(k.create_connector(
+            "my mcp".into(),
+            "https://example.workers.dev/mcp".into(),
+            vec![ConnectorHeader { name: "Authorization".into(), value: "Bearer x".into() }],
+        ))
+        .unwrap();
+        assert_eq!(k.list_connectors().len(), 1);
+        assert_eq!(k.list_connectors()[0].headers[0].value, "Bearer x");
+        pollster::block_on(k.delete_connector(&c.id)).unwrap();
+        assert!(k.list_connectors().is_empty());
+    }
+
+    #[test]
+    fn connector_rejects_a_non_url_endpoint() {
+        let mut k = k(1_700_000_000);
+        let err = pollster::block_on(k.create_connector(
+            "bad".into(),
+            "not-a-url".into(),
+            vec![],
+        ))
+        .unwrap_err();
+        assert_eq!(err, "endpoint_must_be_a_url");
+    }
+
+    #[test]
+    fn deleting_an_unknown_connector_fails_closed() {
+        let mut k = k(1_700_000_000);
+        let err = pollster::block_on(k.delete_connector("conn_nope")).unwrap_err();
+        assert_eq!(err, "unknown_connector");
+    }
+
+    #[test]
+    fn repository_name_must_be_owner_slash_repo() {
+        let mut k = k(1_700_000_000);
+        let err = pollster::block_on(k.create_repository("just-a-name".into(), None))
+            .unwrap_err();
+        assert_eq!(err, "name_must_be_owner_slash_repo");
+        let ok = pollster::block_on(k.create_repository("comfortcurators/curator".into(), None));
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn repository_cannot_be_added_twice() {
+        let mut k = k(1_700_000_000);
+        pollster::block_on(k.create_repository("comfortcurators/curator".into(), None)).unwrap();
+        let err = pollster::block_on(k.create_repository("comfortcurators/curator".into(), None))
+            .unwrap_err();
+        assert_eq!(err, "repository_already_added");
+    }
+
+    #[test]
+    fn sync_records_count_and_manifest_ref_not_before() {
+        let mut k = k(1_700_000_000);
+        let r = pollster::block_on(k.create_repository("comfortcurators/curator".into(), None))
+            .unwrap();
+        assert!(r.last_synced_at.is_none());
+        let synced = pollster::block_on(k.mark_repository_synced(&r.id, 42, "repos/x/manifest.json".into()))
+            .unwrap();
+        assert_eq!(synced.last_sync_file_count, Some(42));
+        assert!(synced.last_synced_at.is_some());
     }
 }

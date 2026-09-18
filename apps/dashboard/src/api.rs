@@ -438,3 +438,77 @@ async fn post_empty_want<T: for<'a> Deserialize<'a>>(path: &str, want: u16) -> A
     }
     serde_json::from_str(&text).map_err(|e| ApiError(format!("{path}: bad json: {e}")))
 }
+
+// ---- compute: connectors ----
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectorInfo {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub header_names: Vec<String>,
+    pub created_at: String,
+}
+
+pub async fn list_connectors() -> ApiResult<Vec<ConnectorInfo>> {
+    get("/organic/connectors").await
+}
+
+#[derive(Serialize)]
+pub struct ConnectorHeaderIn<'a> {
+    pub name: &'a str,
+    pub value: &'a str,
+}
+
+#[derive(Serialize)]
+struct CreateConnectorBody<'a> {
+    name: &'a str,
+    endpoint: &'a str,
+    headers: &'a [ConnectorHeaderIn<'a>],
+}
+
+pub async fn create_connector(
+    name: &str,
+    endpoint: &str,
+    headers: &[ConnectorHeaderIn<'_>],
+) -> ApiResult<ConnectorInfo> {
+    post("/organic/connectors", &CreateConnectorBody { name, endpoint, headers }, 201).await
+}
+
+pub async fn delete_connector(id: &str) -> ApiResult<()> {
+    post_empty(&format!("/organic/connectors/{}/delete", js_sys::encode_uri_component(id)), 200).await
+}
+
+// ---- data: repositories ----
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepositoryInfo {
+    pub id: String,
+    pub name: String,
+    pub has_token: bool,
+    pub created_at: String,
+    pub last_synced_at: Option<String>,
+    pub last_sync_file_count: Option<u64>,
+}
+
+pub async fn list_repositories() -> ApiResult<Vec<RepositoryInfo>> {
+    get("/organic/repositories").await
+}
+
+#[derive(Serialize)]
+struct CreateRepositoryBody<'a> {
+    name: &'a str,
+    github_token: Option<&'a str>,
+}
+
+pub async fn create_repository(name: &str, github_token: Option<&str>) -> ApiResult<RepositoryInfo> {
+    post("/organic/repositories", &CreateRepositoryBody { name, github_token }, 201).await
+}
+
+pub async fn delete_repository(id: &str) -> ApiResult<()> {
+    post_empty(&format!("/organic/repositories/{}/delete", js_sys::encode_uri_component(id)), 200).await
+}
+
+pub async fn sync_repository(id: &str) -> ApiResult<RepositoryInfo> {
+    post_empty_want(&format!("/organic/repositories/{}/sync", js_sys::encode_uri_component(id)), 200).await
+}

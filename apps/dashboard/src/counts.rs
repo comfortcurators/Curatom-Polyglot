@@ -25,6 +25,8 @@ impl Counts {
             // Not a list -- the tile shows "–" rather than a count, same
             // as any plate this struct has no field for.
             PlateId::Account => None,
+            PlateId::Compute => None,
+            PlateId::Data => None,
         }
     }
 }

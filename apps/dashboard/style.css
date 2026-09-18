@@ -234,6 +234,12 @@ input {
 .vt-plate-account {
   view-transition-name: plate-account;
 }
+.vt-plate-compute {
+  view-transition-name: plate-compute;
+}
+.vt-plate-data {
+  view-transition-name: plate-data;
+}
 
 /* --- plate panel (fullscreen) --- */
 

@@ -9,6 +9,8 @@ mod passkey_browser;
 mod plate_account;
 mod plate_activity;
 mod plate_billboard;
+mod plate_compute;
+mod plate_data;
 mod plate_keys;
 mod plate_knocks;
 mod plate_valhalla;

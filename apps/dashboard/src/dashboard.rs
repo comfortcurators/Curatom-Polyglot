@@ -9,6 +9,8 @@ use crate::api;
 use crate::counts::use_counts;
 use crate::plate_account::AccountPlate;
 use crate::plate_activity::ActivityPlate;
+use crate::plate_compute::ComputePlate;
+use crate::plate_data::DataPlate;
 use crate::plate_billboard::BillboardPlate;
 use crate::plate_keys::KeysPlate;
 use crate::plate_knocks::KnocksPlate;
@@ -188,6 +190,8 @@ fn PlateFullscreen(plate: PlateId, on_close: Callback<()>) -> impl IntoView {
                 PlateId::Billboard => view! { <BillboardPlate /> }.into_any(),
                 PlateId::Activity => view! { <ActivityPlate /> }.into_any(),
                 PlateId::Account => view! { <AccountPlate /> }.into_any(),
+                PlateId::Compute => view! { <ComputePlate /> }.into_any(),
+                PlateId::Data => view! { <DataPlate /> }.into_any(),
             }}
         </div>
     }

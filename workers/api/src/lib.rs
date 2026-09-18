@@ -20,12 +20,13 @@ use worker::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use base64::Engine;
 use curatom_attestation::{hmac_hex, hmac_key_bytes, AttestationClaims};
 use curatom_key_kernel::Kernel;
 use curatom_organic_router::{activity_view, approval_view, intent_view, me_view};
 use curatom_protocol::{
-    ApprovalDecision, Duration as CuratomDuration, HttpRequestDto, InorganicRequest, KnockStatus,
-    OrganicToken, Outcome, OwnerRecord, Permission,
+    ApprovalDecision, ConnectorHeader, Duration as CuratomDuration, HttpRequestDto,
+    InorganicRequest, KnockStatus, OrganicToken, Outcome, OwnerRecord, Permission,
 };
 use curatom_substrate_cloudflare::{
     to_dto, CloudflareAccessIdentityProvider, CloudflareClock, DOEventLedger, DOStateStore,
@@ -33,6 +34,7 @@ use curatom_substrate_cloudflare::{
 };
 use curatom_ports::Clock;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 mod auth_users;
@@ -255,6 +257,38 @@ impl DurableObject for CuratomKernel {
                 self.h_internal_authorize_provision(&hr).await
             }
             ("GET", "/organic/frozen") => self.h_frozen_list(&hr).await,
+            ("GET", "/organic/connectors") => self.h_list_connectors(&hr).await,
+            ("POST", "/organic/connectors") => self.h_create_connector(&hr).await,
+            ("POST", p) if p.starts_with("/organic/connectors/") && p.ends_with("/delete") => {
+                let id = p
+                    .trim_start_matches("/organic/connectors/")
+                    .trim_end_matches("/delete")
+                    .to_string();
+                self.h_delete_connector(&hr, &id).await
+            }
+            ("GET", "/organic/repositories") => self.h_list_repositories(&hr).await,
+            ("POST", "/organic/repositories") => self.h_create_repository(&hr).await,
+            ("POST", p) if p.starts_with("/organic/repositories/") && p.ends_with("/delete") => {
+                let id = p
+                    .trim_start_matches("/organic/repositories/")
+                    .trim_end_matches("/delete")
+                    .to_string();
+                self.h_delete_repository(&hr, &id).await
+            }
+            ("POST", p) if p.starts_with("/organic/repositories/") && p.ends_with("/sync") => {
+                let id = p
+                    .trim_start_matches("/organic/repositories/")
+                    .trim_end_matches("/sync")
+                    .to_string();
+                self.h_sync_repository(&hr, &id).await
+            }
+            ("GET", p) if p.starts_with("/organic/repositories/") && p.ends_with("/manifest") => {
+                let id = p
+                    .trim_start_matches("/organic/repositories/")
+                    .trim_end_matches("/manifest")
+                    .to_string();
+                self.h_repository_manifest(&hr, &id).await
+            }
             _ => (404, json!({ "error": "not_found" })),
         };
 
@@ -1683,6 +1717,360 @@ impl CuratomKernel {
         (200, json!({ "frozen": list }))
     }
 
+    // ---- compute: user-defined connectors ----
+    //
+    // No connector ships pre-wired, to this owner or anyone else. This
+    // Worker knows nothing named "hostos" or "hostos-mcp" -- an owner who
+    // wants one adds it here, supplying their own endpoint and whatever
+    // auth headers it needs, the same as any other user adding any other
+    // MCP server. There is no code path anywhere that treats one owner's
+    // connector list differently from another's.
+
+    async fn h_list_connectors(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        // Header *values* are credentials. Once stored, this is the only
+        // read path for them, and it never gives one back -- same
+        // discipline as a minted password or a capability token.
+        let list: Vec<Value> = k
+            .list_connectors()
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "name": c.name,
+                    "endpoint": c.endpoint,
+                    "header_names": c.headers.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
+                    "created_at": c.created_at,
+                })
+            })
+            .collect();
+        (200, json!(list))
+    }
+
+    async fn h_create_connector(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        #[derive(Deserialize)]
+        struct HeaderIn {
+            name: String,
+            value: String,
+        }
+        #[derive(Deserialize)]
+        struct Body {
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            endpoint: String,
+            #[serde(default)]
+            headers: Vec<HeaderIn>,
+        }
+        let body: Body = match serde_json::from_str(&hr.body) {
+            Ok(v) => v,
+            Err(_) => return (400, json!({ "error": "invalid_json" })),
+        };
+        let headers = body
+            .headers
+            .into_iter()
+            .map(|h| ConnectorHeader { name: h.name, value: h.value })
+            .collect();
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.create_connector(body.name, body.endpoint, headers).await {
+            Ok(c) => (
+                201,
+                // The values just came from this same request's body --
+                // echoing them back is not a re-exposure, the caller
+                // already has them. `h_list_connectors` is the one that
+                // must never do this.
+                json!({
+                    "id": c.id,
+                    "name": c.name,
+                    "endpoint": c.endpoint,
+                    "header_names": c.headers.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
+                    "created_at": c.created_at,
+                }),
+            ),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_delete_connector(&self, hr: &HttpRequestDto, id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.delete_connector(id).await {
+            Ok(()) => (200, json!({ "ok": true })),
+            Err(e) => (404, json!({ "error": e })),
+        }
+    }
+
+    // ---- data: repositories ----
+
+    async fn h_list_repositories(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        let list: Vec<Value> = k.list_repositories().iter().map(repository_view).collect();
+        (200, json!(list))
+    }
+
+    async fn h_create_repository(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        #[derive(Deserialize)]
+        struct Body {
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            github_token: Option<String>,
+        }
+        let body: Body = match serde_json::from_str(&hr.body) {
+            Ok(v) => v,
+            Err(_) => return (400, json!({ "error": "invalid_json" })),
+        };
+        let github_token = body.github_token.filter(|t| !t.is_empty());
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.create_repository(body.name, github_token).await {
+            Ok(r) => (201, repository_view(&r)),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_delete_repository(&self, hr: &HttpRequestDto, id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.delete_repository(id).await {
+            Ok(()) => (200, json!({ "ok": true })),
+            Err(e) => (404, json!({ "error": e })),
+        }
+    }
+
+    /// Manual, on-demand only -- there is no cron or webhook wired to this
+    /// yet, and the dashboard says so. Walks the repo's default-branch
+    /// tree via the GitHub API, pulls the raw content of any recognized
+    /// dependency-manifest file it finds (never parsed -- the raw text is
+    /// what an LLM reading it actually wants, and per-ecosystem parsing is
+    /// a correctness claim this endpoint doesn't make), and writes one
+    /// JSON manifest to R2. A private repo needs its own token, supplied
+    /// at `create_repository` time; this owner's, not a shared one --
+    /// this Worker holds no GitHub credential of its own.
+    async fn h_sync_repository(&self, hr: &HttpRequestDto, id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let owner_id = self.owner_id.borrow().clone();
+        let repo = {
+            let k = self.kernel.borrow();
+            let Some(k) = k.as_ref() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            match k.get_repository(id) {
+                Some(r) => r,
+                None => return (404, json!({ "error": "unknown_repository" })),
+            }
+        };
+
+        let auth_header = repo.github_token.as_ref().map(|t| format!("Bearer {t}"));
+
+        let repo_meta = match github_get(&format!("https://api.github.com/repos/{}", repo.name), auth_header.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return (502, json!({ "error": format!("github: {e}") })),
+        };
+        let Some(default_branch) = repo_meta.get("default_branch").and_then(|v| v.as_str()) else {
+            return (502, json!({ "error": "github_repo_not_found_or_no_default_branch" }));
+        };
+
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/git/trees/{}?recursive=1",
+            repo.name, default_branch
+        );
+        let tree = match github_get(&tree_url, auth_header.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return (502, json!({ "error": format!("github: {e}") })),
+        };
+        let entries = tree.get("tree").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let files: Vec<Value> = entries
+            .iter()
+            .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("blob"))
+            .map(|e| {
+                json!({
+                    "path": e.get("path").and_then(|v| v.as_str()).unwrap_or_default(),
+                    "size": e.get("size").and_then(|v| v.as_i64()).unwrap_or(0),
+                })
+            })
+            .collect();
+
+        const RECOGNIZED_MANIFESTS: &[&str] = &[
+            "package.json", "Cargo.toml", "requirements.txt", "pyproject.toml",
+            "go.mod", "Gemfile", "composer.json", "pom.xml", "mix.exs",
+        ];
+        let manifest_paths: Vec<String> = files
+            .iter()
+            .filter_map(|f| f.get("path").and_then(|v| v.as_str()))
+            .filter(|p| {
+                let basename = p.rsplit('/').next().unwrap_or(p);
+                RECOGNIZED_MANIFESTS.contains(&basename)
+            })
+            .take(20)
+            .map(String::from)
+            .collect();
+
+        let mut manifests: Vec<Value> = Vec::new();
+        for path in &manifest_paths {
+            let url = format!(
+                "https://api.github.com/repos/{}/contents/{}?ref={}",
+                repo.name, path, default_branch
+            );
+            if let Ok(content_json) = github_get(&url, auth_header.as_deref()).await {
+                let raw_b64: String = content_json
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(raw_b64)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                if let Some(text) = decoded {
+                    manifests.push(json!({ "path": path, "content": text }));
+                }
+            }
+        }
+
+        let manifest_doc = json!({
+            "repository": repo.name,
+            "default_branch": default_branch,
+            "synced_at": CloudflareClock.now_iso(),
+            "file_count": files.len(),
+            "files": files,
+            "manifests": manifests,
+        });
+        let manifest_ref = format!("repos/{owner_id}/{id}/manifest.json");
+        let bucket = match self.env.bucket("CURATOM_ARTIFACTS") {
+            Ok(b) => b,
+            Err(e) => return (500, json!({ "error": format!("bucket: {e}") })),
+        };
+        if let Err(e) = bucket
+            .put(&manifest_ref, manifest_doc.to_string().into_bytes())
+            .execute()
+            .await
+        {
+            return (500, json!({ "error": format!("r2_put: {e}") }));
+        }
+
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.mark_repository_synced(id, files.len(), manifest_ref).await {
+            Ok(r) => (200, repository_view(&r)),
+            Err(e) => (404, json!({ "error": e })),
+        }
+    }
+
+    /// Reads back what `h_sync_repository` wrote -- writing a manifest to
+    /// R2 and never building a way to read it back would have made the
+    /// whole feature theatre. Scoped the same way `h_billboard_blob` is:
+    /// the repository must belong to this owner (checked via the kernel,
+    /// not by trusting the id), and its `manifest_ref` is what's actually
+    /// fetched, never an arbitrary caller-supplied R2 key.
+    async fn h_repository_manifest(&self, hr: &HttpRequestDto, id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let manifest_ref = {
+            let k = self.kernel.borrow();
+            let Some(k) = k.as_ref() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            match k.get_repository(id) {
+                Some(r) => match r.manifest_ref {
+                    Some(m) => m,
+                    None => return (404, json!({ "error": "never_synced" })),
+                },
+                None => return (404, json!({ "error": "unknown_repository" })),
+            }
+        };
+        let bucket = match self.env.bucket("CURATOM_ARTIFACTS") {
+            Ok(b) => b,
+            Err(e) => return (500, json!({ "error": format!("bucket: {e}") })),
+        };
+        match bucket.get(&manifest_ref).execute().await {
+            Ok(Some(obj)) => match obj.body() {
+                Some(body) => match body.text().await {
+                    Ok(text) => match serde_json::from_str::<Value>(&text) {
+                        Ok(v) => (200, v),
+                        Err(e) => (500, json!({ "error": format!("bad_manifest_json: {e}") })),
+                    },
+                    Err(e) => (500, json!({ "error": format!("read: {e}") })),
+                },
+                None => (404, json!({ "error": "empty_body" })),
+            },
+            Ok(None) => (404, json!({ "error": "not_found" })),
+            Err(e) => (500, json!({ "error": format!("get: {e}") })),
+        }
+    }
+}
+
+/// `github_token` is a live credential -- never returned to the
+/// dashboard, in a create response or a listing alike.
+fn repository_view(r: &curatom_protocol::Repository) -> Value {
+    json!({
+        "id": r.id,
+        "name": r.name,
+        "has_token": r.github_token.is_some(),
+        "created_at": r.created_at,
+        "last_synced_at": r.last_synced_at,
+        "last_sync_file_count": r.last_sync_file_count,
+    })
+}
+
+/// GitHub requires a `User-Agent` on every request or it 403s outright.
+async fn github_get(url: &str, auth_header: Option<&str>) -> std::result::Result<Value, String> {
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get);
+    let headers = Headers::new();
+    let _ = headers.set("User-Agent", "curatom-polyglot");
+    let _ = headers.set("Accept", "application/vnd.github+json");
+    if let Some(auth) = auth_header {
+        let _ = headers.set("Authorization", auth);
+    }
+    init.with_headers(headers);
+    let req = Request::new_with_init(url, &init).map_err(|e| e.to_string())?;
+    let mut resp = Fetch::Request(req).send().await.map_err(|e| e.to_string())?;
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if resp.status_code() >= 400 {
+        return Err(format!("{} {}", resp.status_code(), text.chars().take(200).collect::<String>()));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("bad_json: {e}"))
 }
 
 /// Contract 2's one POST. Service binding, not a public URL.

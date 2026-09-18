@@ -67,6 +67,52 @@ pub struct Knock {
 
 pub const KNOCK_TTL_SECS: i64 = 88;
 
+/// One auth header a connector sends on every call -- `name` alone is
+/// safe to hand back to the dashboard after creation; `value` is not,
+/// the same discipline as a minted password or a capability token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// A user-defined MCP (or any HTTP-reachable tool) endpoint this owner
+/// has told Curatom about. Curatom never ships one pre-wired -- see the
+/// module doc on `Kernel::create_connector` for why that line matters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connector {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub endpoint: String,
+    #[serde(default)]
+    pub headers: Vec<ConnectorHeader>,
+    pub created_at: String,
+}
+
+/// A repository this owner has pointed Curatom at, for `Kernel::sync_repository`
+/// (executed in the Worker, since fetching GitHub is I/O this crate never
+/// does) to pull a structured, LLM-readable snapshot of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Repository {
+    pub id: String,
+    pub owner_id: String,
+    /// `owner/repo`, GitHub's own shorthand.
+    pub name: String,
+    /// A PAT for a private repo. Never serialized back to the dashboard
+    /// after creation -- same discipline as a connector header's value.
+    #[serde(default)]
+    pub github_token: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub last_synced_at: Option<String>,
+    #[serde(default)]
+    pub last_sync_file_count: Option<usize>,
+    /// R2 key of the most recent manifest `sync_repository` wrote, if any.
+    #[serde(default)]
+    pub manifest_ref: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Freeze {
     pub id: String,

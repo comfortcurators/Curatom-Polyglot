@@ -6,16 +6,20 @@ pub enum PlateId {
     Billboard,
     Activity,
     Account,
+    Compute,
+    Data,
 }
 
 impl PlateId {
-    pub const ALL: [PlateId; 6] = [
+    pub const ALL: [PlateId; 8] = [
         PlateId::Knocks,
         PlateId::Keys,
         PlateId::Valhalla,
         PlateId::Billboard,
         PlateId::Activity,
         PlateId::Account,
+        PlateId::Compute,
+        PlateId::Data,
     ];
 
     pub fn title(self) -> &'static str {
@@ -26,6 +30,8 @@ impl PlateId {
             PlateId::Billboard => "Billboard",
             PlateId::Activity => "Activity",
             PlateId::Account => "Account",
+            PlateId::Compute => "Compute",
+            PlateId::Data => "Data",
         }
     }
 
@@ -37,6 +43,8 @@ impl PlateId {
             PlateId::Billboard => "Every intent and pattern, kept",
             PlateId::Activity => "The raw feed",
             PlateId::Account => "Who's signed in, sign out",
+            PlateId::Compute => "Your own connectors, your own auth",
+            PlateId::Data => "Repository snapshots, synced by hand",
         }
     }
 
@@ -51,6 +59,8 @@ impl PlateId {
             PlateId::Billboard => "vt-plate-billboard",
             PlateId::Activity => "vt-plate-activity",
             PlateId::Account => "vt-plate-account",
+            PlateId::Compute => "vt-plate-compute",
+            PlateId::Data => "vt-plate-data",
         }
     }
 }

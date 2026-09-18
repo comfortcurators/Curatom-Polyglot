@@ -2,8 +2,8 @@
 
 pub mod access;
 pub use access::{
-    Freeze, KeyLogEntry, Knock, KnockStatus, OrganicMeView, OrganicToken, OwnerRecord,
-    KNOCK_TTL_SECS,
+    Connector, ConnectorHeader, Freeze, KeyLogEntry, Knock, KnockStatus, OrganicMeView,
+    OrganicToken, OwnerRecord, Repository, KNOCK_TTL_SECS,
 };
 
 use serde::{Deserialize, Serialize};
@@ -171,6 +171,13 @@ pub struct KernelState {
     pub activity: Vec<Activity>,
     #[serde(default)]
     pub freezes: HashMap<String, Freeze>,
+    /// User-added compute connectors. `serde(default)` so every account's
+    /// state written before this field existed still loads.
+    #[serde(default)]
+    pub connectors: HashMap<String, Connector>,
+    /// Repositories this owner has pointed Curatom at for the Data plate.
+    #[serde(default)]
+    pub repositories: HashMap<String, Repository>,
 }
 
 impl KernelState {
