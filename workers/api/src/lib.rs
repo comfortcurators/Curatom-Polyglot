@@ -35,6 +35,7 @@ use curatom_ports::Clock;
 
 use serde_json::{json, Value};
 
+mod auth_users;
 mod mcp_gateway;
 mod scratchpad;
 pub use scratchpad::Scratchpad;
@@ -65,6 +66,24 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
     if req.path() == "/tools/call" {
         return mcp_gateway::handle_tools_call(req, &env).await;
+    }
+    // Real per-user accounts. Additive: nothing below this block, and
+    // nothing in `CuratomKernel`, reads a `/auth/*` session yet -- this
+    // is step 1 of the founder's own registration workflow (register,
+    // get a username/password), wired against D1 directly, same as the
+    // capability broker above. Step 2 is giving a registered user their
+    // own workspace; RAJ_TOKEN and Access stay live until that exists.
+    if req.path() == "/auth/register" && req.method() == Method::Post {
+        return auth_users::handle_register(req, &env).await;
+    }
+    if req.path() == "/auth/login" && req.method() == Method::Post {
+        return auth_users::handle_login(req, &env).await;
+    }
+    if req.path() == "/auth/logout" && req.method() == Method::Post {
+        return auth_users::handle_logout(req, &env).await;
+    }
+    if req.path() == "/auth/me" && req.method() == Method::Get {
+        return auth_users::handle_me(req, &env).await;
     }
     let ns = env.durable_object("CURATOM_KERNEL")?;
     let id = ns.id_from_name(&env.var("CURATOM_OWNER_ID")?.to_string())?;
@@ -1742,7 +1761,7 @@ fn gif_pixel() -> Result<Response> {
     Response::from_bytes(bytes).map(|r| r.with_headers(headers).with_status(200))
 }
 
-fn json_response(status: u16, body: Value) -> Result<Response> {
+pub(crate) fn json_response(status: u16, body: Value) -> Result<Response> {
     match Response::from_json(&body) {
         Ok(r) => Ok(r.with_status(status)),
         Err(e) => {
