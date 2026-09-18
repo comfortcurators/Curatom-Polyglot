@@ -446,12 +446,25 @@ impl CuratomKernel {
             return r;
         }
         let owner_id = self.owner_id.borrow().clone();
-        let k = self.kernel.borrow();
-        let Some(k) = k.as_ref() else {
-            return (503, json!({ "error": "kernel_not_ready" }));
-        };
-        if k.has_owner() {
-            return (409, json!({ "error": "owner_already_enrolled" }));
+        // Scoped: this immutable borrow must be dropped before
+        // `borrow_mut()` below runs. Shadowing the name `k` does *not*
+        // do that -- a `Ref` guard's `Drop` fires at the end of its
+        // lexical scope, not at its last syntactic use, so the earlier
+        // guard stays alive (just inaccessible) past the shadowing
+        // `let` and panics the second borrow with "already borrowed".
+        // That panic is a Rust trap inside the Durable Object, which
+        // Cloudflare surfaces as a dropped connection -- `TypeError:
+        // Load failed` in the browser, no HTTP response at all.
+        // Reproduced live: registering a real account and tapping
+        // "BEGIN" on the enrollment screen hit exactly this.
+        {
+            let k = self.kernel.borrow();
+            let Some(k) = k.as_ref() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            if k.has_owner() {
+                return (409, json!({ "error": "owner_already_enrolled" }));
+            }
         }
         let body: Value = serde_json::from_str(&hr.body).unwrap_or(json!({}));
         let display_name = body
