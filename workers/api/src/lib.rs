@@ -37,7 +37,6 @@ use serde_json::{json, Value};
 
 mod auth_users;
 mod mail;
-mod mcp_gateway;
 mod scratchpad;
 pub use scratchpad::Scratchpad;
 
@@ -55,19 +54,6 @@ const ATTESTATION_TTL_SECONDS: i64 = 300;
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    // The capability broker needs the raw Authorization header and the raw
-    // body to forward upstream -- both consumed by `to_dto` on the DO path
-    // below -- and it holds no Durable Object state, only D1 and the
-    // HOSTOS_MCP service binding. Handled here, before the DO, not inside it.
-    if req.path() == "/mcp" {
-        return mcp_gateway::handle_mcp(req, &env).await;
-    }
-    if req.path() == "/tools/list" {
-        return mcp_gateway::handle_tools_list(req, &env).await;
-    }
-    if req.path() == "/tools/call" {
-        return mcp_gateway::handle_tools_call(req, &env).await;
-    }
     // Real per-user accounts: register with an email, verify it, get a
     // minted username and password back. Wired against D1 directly, same
     // as the capability broker above.
@@ -250,7 +236,6 @@ impl DurableObject for CuratomKernel {
                 self.h_internal_authorize_provision(&hr).await
             }
             ("GET", "/organic/frozen") => self.h_frozen_list(&hr).await,
-            ("GET", "/organic/estate") => self.h_estate(&hr).await,
             _ => (404, json!({ "error": "not_found" })),
         };
 
@@ -773,38 +758,6 @@ impl CuratomKernel {
                 Err(e) => return (500, json!({ "error": e })),
             }
         };
-
-        // hostos_mcp used to be its own grant kind here: approving a knock
-        // for it minted a time-boxed row directly in the capabilities D1
-        // table (mcp_gateway.rs), keyed on the AI's own token. Retired,
-        // deliberately, not merely disabled -- every registered account now
-        // owns its own CuratomKernel instance (see `bootstrap_owner_id`),
-        // so `self.owner(hr)` above no longer distinguishes the founder
-        // from anyone who signed up; leaving this branch in place, gated
-        // or not, keeps a single hard-coded shortcut into one specific
-        // Worker (GITHUB_APP_PRIVATE_KEY, CLOUDFLARE_API_TOKEN, R2 keys,
-        // exec) alive in a codebase that is about to have a real, general
-        // "connect your own MCP server" feature in the dashboard -- for
-        // every account, hostos-mcp included as just one more entry a
-        // person adds, not a resource wired into the knock/approval path
-        // by name. Approving a knock that names it now refuses outright
-        // rather than silently falling through to the Valhalla logic
-        // below, which does not know what a "hostos_mcp" resource is
-        // either. No capability row is minted through this path anymore,
-        // for anyone, until the dashboard feature replaces it for real.
-        if knock
-            .resources
-            .iter()
-            .any(|r| r == curatom_resource_registry::HOSTOS_MCP)
-        {
-            return (
-                410,
-                json!({
-                    "error": "hostos_mcp_knock_retired",
-                    "detail": "Approving a knock no longer grants MCP access. Connect an MCP server from the dashboard instead.",
-                }),
-            );
-        }
 
         let wants_valhalla = knock.resources.iter().any(|r| r.starts_with("valhalla."));
         let mut valhalla_sandbox_id: Option<String> = None;
@@ -1636,88 +1589,6 @@ impl CuratomKernel {
         (200, json!({ "frozen": list }))
     }
 
-    /// Real data for the dashboard, pulled live through hostos-mcp's own
-    /// GitHub App and Cloudflare credentials -- never held here. Read-only
-    /// tools only, via the "oauth" scope (see scope.ts): this route can
-    /// prove the estate is configured and reachable, never exec or write.
-    async fn h_estate(&self, hr: &HttpRequestDto) -> Reply {
-        if let Err(r) = self.owner(hr).await {
-            return r;
-        }
-        let fetcher = match self.env.service("HOSTOS_MCP") {
-            Ok(f) => f,
-            Err(e) => return (502, json!({ "error": format!("service binding: {e}") })),
-        };
-
-        let workspace = call_hostos_mcp_tool(&fetcher, "workspace_status", json!({}))
-            .await
-            .unwrap_or_else(|e| json!({ "error": e.to_string() }));
-        let github = call_hostos_mcp_tool(&fetcher, "github_app_status", json!({}))
-            .await
-            .unwrap_or_else(|e| json!({ "error": e.to_string() }));
-
-        (200, json!({ "workspace": workspace, "github": github }))
-    }
-}
-
-/// One `tools/call` against hostos-mcp's internal MCP endpoint, over the
-/// HOSTOS_MCP service binding -- the same fast path Reek and Mimi already
-/// use, with an explicit identity so curatom-kernel gets its own workspace
-/// rather than falling into Reek's (see identity.ts, resolveInternalCaller).
-/// `x-internal-scope: oauth` restricts this to read-only tools plus
-/// curator_act; exec/file_write are unreachable at tool *registration*,
-/// not filtered client-side (see scope.ts, assertToolCatalog).
-async fn call_hostos_mcp_tool(fetcher: &Fetcher, name: &str, arguments: Value) -> Result<Value> {
-    let headers = Headers::new();
-    headers.set("content-type", "application/json")?;
-    headers.set("accept", "application/json, text/event-stream")?;
-    headers.set("x-internal-caller", "curatom-kernel")?;
-    headers.set("x-internal-scope", "oauth")?;
-
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": { "name": name, "arguments": arguments },
-    })
-    .to_string();
-
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_headers(headers)
-        .with_body(Some(wasm_bindgen::JsValue::from_str(&body)));
-
-    let req = Request::new_with_init("https://hostos-mcp.internal/mcp", &init)?;
-    let mut resp = fetcher.fetch_request(req).await?;
-    let status = resp.status_code();
-    let text = resp.text().await.unwrap_or_default();
-    if status >= 400 {
-        return Err(Error::RustError(format!("hostos-mcp {status}: {text}")));
-    }
-
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let parsed: Value = if content_type.contains("text/event-stream") {
-        let line = text
-            .lines()
-            .find(|l| l.starts_with("data:"))
-            .ok_or_else(|| Error::RustError("hostos-mcp: no SSE data".into()))?;
-        serde_json::from_str(line.trim_start_matches("data:").trim())
-            .map_err(|e| Error::RustError(format!("hostos-mcp: bad SSE json: {e}")))?
-    } else {
-        serde_json::from_str(&text)
-            .map_err(|e| Error::RustError(format!("hostos-mcp: bad json: {e}")))?
-    };
-
-    if let Some(err) = parsed.get("error") {
-        return Err(Error::RustError(err.to_string()));
-    }
-    let result = parsed.get("result").cloned().unwrap_or(parsed);
-    Ok(result.get("structuredContent").cloned().unwrap_or(result))
 }
 
 /// Contract 2's one POST. Service binding, not a public URL.
@@ -1851,34 +1722,17 @@ fn key_file_text(t: &OrganicToken) -> String {
                  naming the missing field. \"name\" is how the operator\n\
                  will see you -- use a name they will recognize. \"reason\"\n\
                  is one plain sentence saying why. \"resources\" names what\n\
-                 you're asking for (e.g. [\"hostos_mcp\"] for real tool\n\
-                 access). \"permissions\" is [\"read\"] unless you\n\
-                 specifically need [\"write\"]. \"duration\" is optional --\n\
-                 default is {{\"kind\":\"single_use\"}} for one read; give\n\
+                 you're asking for (e.g. [\"company.whitepaper\"]).\n\
+                 \"permissions\" is [\"read\"] unless you specifically need\n\
+                 [\"write\"]. \"duration\" is optional -- default is\n\
+                 {{\"kind\":\"single_use\"}} for one read; give\n\
                  {{\"kind\":\"ttl\",\"seconds\":N}} for a window instead.\n\n\
          Step 4. The operator sees your request on their dashboard. They\n\
-                 have 88 seconds. If they recognize your name and approve\n\
-                 a \"hostos_mcp\" request, a window opens -- not a single\n\
-                 execution, a span of time in which this same token is a\n\
-                 live capability. If they do not approve, nothing opens.\n\n\
-         Step 5. Inside an open window, use this same token as a Bearer\n\
-                 credential:\n\n\
-                   MCP clients: POST https://curatom.rajvansh.dev/mcp\n\
-                     Authorization: Bearer {token}\n\
-                     Standard JSON-RPC MCP: initialize, tools/list,\n\
-                     tools/call.\n\n\
-                   Plain-HTTP callers (no MCP client): the same window,\n\
-                   as plain JSON --\n\
-                     GET  https://curatom.rajvansh.dev/tools/list\n\
-                     POST https://curatom.rajvansh.dev/tools/call\n\
-                       body: {{\"name\":\"<tool>\",\"arguments\":{{...}}}}\n\
-                     Both take the same Authorization header, no JSON-RPC\n\
-                     envelope required -- a plain result or a plain\n\
-                     {{\"error\":\"...\"}} comes back.\n\n\
-                 Either path resolves to the same scoped tool surface.\n\
-                 Some tools will not be there at all -- that is not a\n\
-                 mistake, do not go looking for a way around it.\n\n\
-         Step 6. If a call answers with an error naming an expired or\n\
+                 have 88 seconds. If they recognize your name and approve,\n\
+                 a window opens -- not a single execution, a span of time\n\
+                 in which this same token is a live capability. If they do\n\
+                 not approve, nothing opens.\n\n\
+         Step 5. If a response answers with an error naming an expired or\n\
                  revoked capability, the window is closed. Read the\n\
                  message; do not retry blindly. If you still need access,\n\
                  submit a new knock (Step 3) -- do not message the\n\

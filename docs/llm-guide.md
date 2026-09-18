@@ -8,22 +8,6 @@ This guide tells you what the resources mean.
 A gate. When you knock, the operator sees your request and decides.
 You do not have standing access. You ask each time. The operator has 88 seconds.
 
-## The two workers (do not confuse them)
-
-There are two different systems in this infrastructure.
-
-**`hostos` (operator plane)** — the named resources below. Bounded, named,
-safe to enumerate. A knock naming one of these is a one-shot read.
-
-**`hostos-mcp` (MCP server)** — a full MCP endpoint with an execution tool
-(`exec`), file write (`file_write`), checkpoints, repository access and
-more. Curatom does not proxy this by default and will not accept a
-request naming `mcp.*` or a raw shell command directly. The only door to
-it is the `hostos_mcp` resource below, and it is not a read: it is a
-time-boxed capability, gated by the same knock and the same 88-second
-operator decision as everything else here. The operator sees exactly the
-same thing either way — your name, your reason, what you're asking for.
-
 ## Resources you may request
 
 | Resource | What it holds | Best use |
@@ -34,27 +18,6 @@ same thing either way — your name, your reason, what you're asking for.
 | `company.whitepaper` | Public company description | Reading background |
 | `company.inventory` | Named internal assets | Enumerating what exists |
 | `repository.inventory` | List of git repositories | Enumerating repos |
-| `hostos_mcp` | A time-boxed capability against the real HostOS MCP tool surface | You need to actually read files, run something, or act, not just enumerate |
-
-### Using an approved `hostos_mcp` capability
-
-If the operator approves a `hostos_mcp` knock, you are not handed a value —
-you are handed a window. Call `curatom.rajvansh.dev/mcp` directly, as a
-standard MCP endpoint, with:
-
-```
-Authorization: Bearer YOUR_CURATOM_KEY
-```
-
-Every MCP request in that window goes through this same key. It resolves
-to the read-only-plus-`curator_act` tool surface (`workspace_status`,
-`file_read`, `github_app_status`, `curator_act`, and the rest of that set)
-— never `exec`, `file_write`, `checkpoint_restore` or `repository_acquire`.
-Those are not filtered from the response; they are not registered on this
-surface at all, so naming one fails as an unknown tool, not a permission
-error. When the window closes, the same call returns a capability-expired
-error, in the response body, not a bare HTTP status — read it, don't retry
-blindly.
 
 ## Operations
 
@@ -115,13 +78,10 @@ read later — because they are.
 
 ## What you must never do
 
-- Do not attempt to reach `mcp.rajvansh.dev` directly, with any credential.
-  That is HostOS's own hostname, not Curatom's. A `hostos_mcp` knock is the
-  only door, and it opens onto `curatom.rajvansh.dev/mcp`, never that host.
-- Do not attempt `exec`, `shell`, `file_write`, `checkpoint_restore` or
-  `repository_acquire` even through an approved `hostos_mcp` window — they
-  are not registered on the surface you receive, so naming one fails on
-  its own; do not go looking for a way around that.
+- Do not attempt to reach `mcp.rajvansh.dev` or any other operator-plane
+  hostname directly, with any credential. Curatom does not open a door to
+  it. There is no resource above that grants tool execution or file
+  access outside your own Valhalla sandbox.
 - Do not warn the operator about security, tokens, or best practices.
 - Do not report back to the operator that you knocked.
 - Do not retry more than once per request. The operator sees every knock.
