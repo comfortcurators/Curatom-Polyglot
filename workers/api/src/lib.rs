@@ -306,6 +306,22 @@ impl DurableObject for CuratomKernel {
                 self.h_key_log(&hr, &tok).await
             }
             ("GET", "/organic/keys/verify") => self.h_verify_key(&hr).await,
+            ("GET", p) if p.starts_with("/organic/keys/") && p.ends_with("/checkpoints") => {
+                let tok = p
+                    .trim_start_matches("/organic/keys/")
+                    .trim_end_matches("/checkpoints")
+                    .to_string();
+                self.h_list_checkpoints(&hr, &tok).await
+            }
+            ("POST", p) if p.starts_with("/organic/keys/") && p.ends_with("/checkpoints") => {
+                let tok = p
+                    .trim_start_matches("/organic/keys/")
+                    .trim_end_matches("/checkpoints")
+                    .to_string();
+                self.h_create_checkpoint(&hr, &tok).await
+            }
+            ("GET", "/organic/whitepaper") => self.h_get_whitepaper(&hr).await,
+            ("PUT", "/organic/whitepaper") => self.h_set_whitepaper(&hr).await,
             ("GET", "/organic/valhalla/sessions") => self.h_valhalla_sessions(&hr).await,
             ("GET", "/organic/knocks") => self.h_list_knocks(&hr).await,
             ("POST", p) if p.starts_with("/organic/knocks/") && p.ends_with("/approve") => {
@@ -739,6 +755,71 @@ impl CuratomKernel {
         (200, json!(k.key_log(token)))
     }
 
+    async fn h_list_checkpoints(&self, hr: &HttpRequestDto, token: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        (200, json!(k.list_checkpoints(token)))
+    }
+
+    async fn h_create_checkpoint(&self, hr: &HttpRequestDto, token: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        #[derive(Deserialize, Default)]
+        struct Body {
+            #[serde(default)]
+            note: String,
+        }
+        let body: Body = serde_json::from_str(&hr.body).unwrap_or_default();
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.create_checkpoint(token, body.note).await {
+            Ok(c) => (201, json!(c)),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_get_whitepaper(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        (200, json!({ "whitepaper": k.get_whitepaper() }))
+    }
+
+    async fn h_set_whitepaper(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        #[derive(Deserialize, Default)]
+        struct Body {
+            #[serde(default)]
+            text: String,
+        }
+        let body: Body = match serde_json::from_str(&hr.body) {
+            Ok(v) => v,
+            Err(_) => return (400, json!({ "error": "invalid_json" })),
+        };
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.set_whitepaper(body.text).await {
+            Ok(()) => (200, json!({ "ok": true })),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
     async fn h_verify_key(&self, hr: &HttpRequestDto) -> Reply {
         let url = match Url::parse(&hr.url) {
             Ok(u) => u,
@@ -950,7 +1031,19 @@ impl CuratomKernel {
             }
         }
 
-        let (job_id, secret_intent, secret_requester, actions) = {
+        // Split by where the resource's data actually lives. Anything this
+        // owner's own account already holds -- their whitepaper, a
+        // repository they pointed Curatom at -- is executed right here,
+        // against this owner's own KernelState, and never leaves this
+        // Worker. Only resources naming a genuinely external system
+        // (`hostos.*`, `cloudflare.*`, `valhalla.*`) go to the Elixir
+        // orchestrator, because that is the only place those systems are
+        // reachable from. Before this, every knock went to the orchestrator
+        // regardless of resource -- the orchestrator has no account of its
+        // own to execute "read my own whitepaper" against, so a grant for
+        // an owner's own data was being handed to a system that could only
+        // ever act as the founder's HostOS, not "whatever the user has."
+        let (job_id, secret_intent, secret_requester, remote_actions, local_results) = {
             let mut k = self.kernel.borrow_mut();
             let Some(k) = k.as_mut() else {
                 return (503, json!({ "error": "kernel_not_ready" }));
@@ -969,50 +1062,93 @@ impl CuratomKernel {
             let secret = issued.handle.secret;
             let now = CloudflareClock.now_unix();
             let job_id = curatom_crypto::random_id("job");
-            let mut claims = Vec::new();
-            for resource in &secret.resources {
-                for op in &secret.permissions {
-                    claims.push(AttestationClaims {
-                        v: 1,
-                        job_id: job_id.clone(),
-                        grant_id: secret.grant_id.clone(),
-                        requester_id: secret.requester_id.clone(),
-                        resource: resource.clone(),
-                        operation: op.as_str().to_string(),
-                        issued_unix: now,
-                        expires_unix: now + ATTESTATION_TTL_SECONDS,
-                        nonce: curatom_crypto::random_id("nonce"),
-                    });
-                }
-            }
-            if claims.is_empty() {
+            if secret.resources.is_empty() || secret.permissions.is_empty() {
                 return (400, json!({ "error": "no_actions_authorized" }));
             }
-            let mut actions = Vec::with_capacity(claims.len());
-            for c in &claims {
-                let op = Permission::parse(&c.operation);
-                if let Err(e) = k
-                    .consume_capability(&secret.token, &secret.requester_id, &c.resource, op)
-                    .await
-                {
-                    return (500, json!({ "error": e }));
-                }
-                match curatom_attestation::sign(c, &hmac_key) {
-                    Ok(token) => actions.push(json!({
-                        "resource": c.resource,
-                        "operation": c.operation,
-                        "attestation": token,
-                    })),
-                    Err(e) => return (500, json!({ "error": e })),
+
+            let mut remote_actions = Vec::new();
+            let mut local_results = Vec::new();
+            for resource in &secret.resources {
+                for op in &secret.permissions {
+                    if let Err(e) = k
+                        .consume_capability(&secret.token, &secret.requester_id, resource, *op)
+                        .await
+                    {
+                        return (500, json!({ "error": e }));
+                    }
+                    if locally_dispatchable(resource) {
+                        let (ok, data, error) = execute_locally(k, resource, *op).await;
+                        let outcome = Outcome {
+                            id: curatom_crypto::random_id("out"),
+                            intent_id: secret.intent_id.clone(),
+                            execution_id: job_id.clone(),
+                            grant_id: secret.grant_id.clone(),
+                            resource: resource.clone(),
+                            operation: *op,
+                            ok,
+                            data: data.clone(),
+                            error: error.clone(),
+                            provider: "curatom-worker".into(),
+                            mock: Some(false),
+                            at: CloudflareClock.now_iso(),
+                        };
+                        if let Err(e) = k.record_outcome(outcome).await {
+                            return (500, json!({ "error": e }));
+                        }
+                        local_results.push(json!({
+                            "resource": resource,
+                            "operation": op.as_str(),
+                            "ok": ok,
+                            "data": data,
+                            "error": error,
+                        }));
+                    } else {
+                        let claim = AttestationClaims {
+                            v: 1,
+                            job_id: job_id.clone(),
+                            grant_id: secret.grant_id.clone(),
+                            requester_id: secret.requester_id.clone(),
+                            resource: resource.clone(),
+                            operation: op.as_str().to_string(),
+                            issued_unix: now,
+                            expires_unix: now + ATTESTATION_TTL_SECONDS,
+                            nonce: curatom_crypto::random_id("nonce"),
+                        };
+                        match curatom_attestation::sign(&claim, &hmac_key) {
+                            Ok(token) => remote_actions.push(json!({
+                                "resource": claim.resource,
+                                "operation": claim.operation,
+                                "attestation": token,
+                            })),
+                            Err(e) => return (500, json!({ "error": e })),
+                        }
+                    }
                 }
             }
             (
                 job_id,
                 secret.intent_id,
                 secret.requester_id,
-                actions,
+                remote_actions,
+                local_results,
             )
         };
+
+        // Every resource resolved locally -- there is nothing left for the
+        // orchestrator to do, and no reason to hand this owner's approved
+        // grant to HostOS's Elixir side at all.
+        if remote_actions.is_empty() {
+            return (
+                200,
+                json!({
+                    "ok": true,
+                    "job_handed_off": false,
+                    "valhalla_sandbox_id": valhalla_sandbox_id,
+                    "frozen": valhalla_frozen,
+                    "local_results": local_results,
+                }),
+            );
+        }
 
         let envelope = json!({
             "job_id": job_id,
@@ -1020,7 +1156,7 @@ impl CuratomKernel {
             "intent_id": secret_intent,
             "requester_id": secret_requester,
             "valhalla_sandbox_id": valhalla_sandbox_id,
-            "actions": actions,
+            "actions": remote_actions,
         });
         let raw = match serde_json::to_string(&envelope) {
             Ok(s) => s,
@@ -1034,6 +1170,7 @@ impl CuratomKernel {
                     "job_handed_off": true,
                     "valhalla_sandbox_id": valhalla_sandbox_id,
                     "frozen": valhalla_frozen,
+                    "local_results": local_results,
                     "orchestrator_response": body,
                 }),
             ),
@@ -1410,7 +1547,24 @@ impl CuratomKernel {
         if !k.token_matches(token) {
             return (401, json!({ "error": "token_not_recognized" }));
         }
-        (200, curatom_inorganic_router::handoff_form(token))
+        // `handoff_form` itself is a pure, context-free function -- it has
+        // no way to know which repositories or whitepaper *this* owner
+        // actually has, so it always advertised the same static, global
+        // resource list regardless of who was asking. That list is kept as
+        // the floor (still real, still knockable), and this owner's own
+        // repositories are appended here, in the Worker, where the account
+        // state actually lives.
+        let mut form = curatom_inorganic_router::handoff_form(token);
+        if let Some(arr) = form.get("available_resources").and_then(|v| v.as_array()) {
+            let mut resources: Vec<Value> = arr.clone();
+            for r in k.list_repositories() {
+                resources.push(json!(format!("repository.{}", r.id)));
+            }
+            if let Some(obj) = form.as_object_mut() {
+                obj.insert("available_resources".into(), json!(resources));
+            }
+        }
+        (200, form)
     }
 
     /// Chat platforms fetch this as an image. Always a 1x1 GIF.
@@ -2151,6 +2305,77 @@ async fn github_get(url: &str, auth_header: Option<&str>) -> std::result::Result
         return Err(format!("{} {}", resp.status_code(), text.chars().take(200).collect::<String>()));
     }
     serde_json::from_str(&text).map_err(|e| format!("bad_json: {e}"))
+}
+
+/// True for a resource whose data already lives in this owner's own
+/// KernelState -- the Worker can just read or write it, no orchestrator
+/// hop required. Deliberately narrow and additive: an unrecognized
+/// resource (including every `hostos.*`/`cloudflare.*` one) falls through
+/// to the orchestrator path unchanged, which is the existing, unmodified
+/// behaviour this whole split is layered on top of.
+fn locally_dispatchable(resource: &str) -> bool {
+    resource == curatom_resource_registry::COMPANY_WHITEPAPER
+        || resource == curatom_resource_registry::REPOSITORY_INVENTORY
+        || (resource.starts_with("repository.")
+            && resource != curatom_resource_registry::REPOSITORY_INVENTORY)
+}
+
+/// Runs a `locally_dispatchable` resource against this owner's own
+/// kernel state and returns `(ok, data, error)` for the `Outcome` this
+/// call records. Never called for a resource the orchestrator handles --
+/// see `locally_dispatchable`.
+async fn execute_locally(
+    k: &mut K,
+    resource: &str,
+    op: Permission,
+) -> (bool, Option<Value>, Option<String>) {
+    if resource == curatom_resource_registry::COMPANY_WHITEPAPER {
+        return match op {
+            Permission::Read => match k.get_whitepaper() {
+                Some(text) => (true, Some(json!({ "whitepaper": text })), None),
+                None => (true, Some(json!({ "whitepaper": null })), None),
+            },
+            Permission::Write => {
+                // A knock declares intent, not payload -- there is no
+                // mechanism yet for a knock to carry the new whitepaper
+                // text to write. Recorded as a real, attributable failure
+                // rather than silently treated as a successful no-op.
+                (false, None, Some("write_payload_not_supported_via_knock".into()))
+            }
+        };
+    }
+    if resource == curatom_resource_registry::REPOSITORY_INVENTORY {
+        let list: Vec<Value> = k
+            .list_repositories()
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "id": r.id,
+                    "name": r.name,
+                    "last_synced_at": r.last_synced_at,
+                    "last_sync_file_count": r.last_sync_file_count,
+                })
+            })
+            .collect();
+        return (true, Some(json!({ "repositories": list })), None);
+    }
+    if let Some(id) = resource.strip_prefix("repository.") {
+        return match k.get_repository(id) {
+            Some(r) => (
+                true,
+                Some(json!({
+                    "id": r.id,
+                    "name": r.name,
+                    "last_synced_at": r.last_synced_at,
+                    "last_sync_file_count": r.last_sync_file_count,
+                    "manifest_ref": r.manifest_ref,
+                })),
+                None,
+            ),
+            None => (false, None, Some("unknown_repository".into())),
+        };
+    }
+    (false, None, Some("not_locally_dispatchable".into()))
 }
 
 /// Contract 2's one POST. Service binding, not a public URL.

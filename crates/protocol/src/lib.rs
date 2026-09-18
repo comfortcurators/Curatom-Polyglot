@@ -2,8 +2,8 @@
 
 pub mod access;
 pub use access::{
-    Connector, ConnectorHeader, Freeze, KeyLogEntry, Knock, KnockStatus, OrganicMeView,
-    OrganicToken, OwnerRecord, Repository, KNOCK_TTL_SECS,
+    Checkpoint, Connector, ConnectorHeader, Freeze, KeyLogEntry, Knock, KnockStatus,
+    OrganicMeView, OrganicToken, OwnerRecord, Repository, KNOCK_TTL_SECS,
 };
 
 use serde::{Deserialize, Serialize};
@@ -178,6 +178,15 @@ pub struct KernelState {
     /// Repositories this owner has pointed Curatom at for the Data plate.
     #[serde(default)]
     pub repositories: HashMap<String, Repository>,
+    /// Checkpoints, keyed by the token they belong to. A `Vec` in
+    /// creation order -- the current checkpoint is whichever is last.
+    #[serde(default)]
+    pub checkpoints: HashMap<String, Vec<Checkpoint>>,
+    /// This owner's own company context -- per-account, not shared with
+    /// any other owner and not the founder's. `None` until the owner
+    /// writes one.
+    #[serde(default)]
+    pub whitepaper: Option<String>,
 }
 
 impl KernelState {

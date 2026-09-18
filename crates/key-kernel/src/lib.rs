@@ -439,6 +439,11 @@ where
             label: label.clone(),
             created_at: self.clock.now_iso(),
             last_used_at: None,
+            // Minted once, here, and never rotated -- see the field's own
+            // doc comment in curatom-protocol for why a revoke+recreate is
+            // deliberately a new workspace rather than the old one
+            // continuing under a new token.
+            workspace_id: random_id("ws"),
         };
         {
             let st = self.st_mut()?;
@@ -975,6 +980,85 @@ where
         Ok(self.get_repository(id).unwrap())
     }
 
+    // ---- checkpoints ----
+    //
+    // A named point in one key's own history. Bounded on purpose: what a
+    // checkpoint snapshots is up to whoever creates one (by hand today,
+    // a future sandbox action later) -- this crate only owns the record
+    // that it happened, keyed to the token so it can never be listed or
+    // created against a key this owner does not hold.
+
+    pub fn list_checkpoints(&self, token: &str) -> Vec<Checkpoint> {
+        self.st()
+            .ok()
+            .and_then(|s| s.checkpoints.get(token).cloned())
+            .unwrap_or_default()
+    }
+
+    pub async fn create_checkpoint(
+        &mut self,
+        token: &str,
+        note: String,
+    ) -> Result<Checkpoint, String> {
+        if !self.token_matches(token) {
+            return Err("token_not_recognized".into());
+        }
+        let note = note.trim().to_string();
+        if note.len() > 2000 {
+            return Err("note_too_long".into());
+        }
+        let c = Checkpoint {
+            id: random_id("chk"),
+            note: note.clone(),
+            created_at: self.clock.now_iso(),
+        };
+        {
+            let st = self.st_mut()?;
+            let list = st.checkpoints.entry(token.to_string()).or_default();
+            list.push(c.clone());
+            // Bounded history -- the current checkpoint is the last one;
+            // older ones are logs, not something anyone pages through.
+            if list.len() > 200 {
+                let overflow = list.len() - 200;
+                list.drain(0..overflow);
+            }
+        }
+        self.note("checkpoint.created", note, None, None);
+        self.persist().await?;
+        Ok(c)
+    }
+
+    // ---- whitepaper ----
+    //
+    // This owner's own company context. Per-account, never shared: no
+    // key belonging to any *other* owner can read into it, and it is
+    // never the founder's document leaking into someone else's account.
+    // `None` until the owner writes one -- there is no default text.
+
+    const WHITEPAPER_MAX_LEN: usize = 20_000;
+
+    pub fn get_whitepaper(&self) -> Option<String> {
+        self.st().ok().and_then(|s| s.whitepaper.clone())
+    }
+
+    pub async fn set_whitepaper(&mut self, text: String) -> Result<(), String> {
+        if text.len() > Self::WHITEPAPER_MAX_LEN {
+            return Err("whitepaper_too_long".into());
+        }
+        let is_clear = text.trim().is_empty();
+        {
+            let st = self.st_mut()?;
+            st.whitepaper = if is_clear { None } else { Some(text) };
+        }
+        self.note(
+            if is_clear { "whitepaper.cleared" } else { "whitepaper.updated" },
+            String::new(),
+            None,
+            None,
+        );
+        self.persist().await
+    }
+
     pub async fn issue_knock_grant(&mut self, knock: &Knock) -> Result<Option<IssuedGrant>, String> {
         if self.st()?.issued.contains(&knock.id) {
             return Ok(None);
@@ -1350,5 +1434,59 @@ mod tests {
             .unwrap();
         assert_eq!(synced.last_sync_file_count, Some(42));
         assert!(synced.last_synced_at.is_some());
+    }
+
+    #[test]
+    fn every_key_gets_its_own_workspace_id() {
+        let mut k = k(1_700_000_000);
+        let a = pollster::block_on(k.create_key("a".into())).unwrap();
+        let b = pollster::block_on(k.create_key("b".into())).unwrap();
+        assert!(!a.workspace_id.is_empty());
+        assert!(!b.workspace_id.is_empty());
+        assert_ne!(a.workspace_id, b.workspace_id);
+    }
+
+    #[test]
+    fn checkpoints_are_scoped_to_their_own_token() {
+        let mut k = k(1_700_000_000);
+        let a = pollster::block_on(k.create_key("a".into())).unwrap();
+        let b = pollster::block_on(k.create_key("b".into())).unwrap();
+        pollster::block_on(k.create_checkpoint(&a.token, "before refactor".into())).unwrap();
+        pollster::block_on(k.create_checkpoint(&a.token, "after refactor".into())).unwrap();
+        assert_eq!(k.list_checkpoints(&a.token).len(), 2);
+        assert!(k.list_checkpoints(&b.token).is_empty());
+        let err = pollster::block_on(k.create_checkpoint("not-a-real-token", "x".into()))
+            .unwrap_err();
+        assert_eq!(err, "token_not_recognized");
+    }
+
+    #[test]
+    fn whitepaper_is_none_until_written_and_clears_on_empty_text() {
+        let mut k = k(1_700_000_000);
+        assert_eq!(k.get_whitepaper(), None);
+        pollster::block_on(k.set_whitepaper("We govern compute by cost.".into())).unwrap();
+        assert_eq!(k.get_whitepaper().as_deref(), Some("We govern compute by cost."));
+        pollster::block_on(k.set_whitepaper("   ".into())).unwrap();
+        assert_eq!(k.get_whitepaper(), None);
+    }
+
+    #[test]
+    fn whitepaper_never_crosses_owners() {
+        // Same discipline as `token_carries_its_owner_...` above, pointed
+        // at the other new per-account field: two owners, two kernels,
+        // two independent stores -- one owner's whitepaper must not be
+        // readable through the other's kernel.
+        let mut mine = k(1_700_000_000);
+        pollster::block_on(mine.set_whitepaper("Mine, not shared.".into())).unwrap();
+        let mut theirs = Kernel::new(
+            "org_other".into(),
+            MemoryStateStore::new(),
+            MemoryLedger::new(),
+            MemoryArtifacts::new(),
+            FrozenClock::new(1_700_000_000),
+        );
+        pollster::block_on(theirs.load()).unwrap();
+        assert_eq!(theirs.get_whitepaper(), None);
+        assert_eq!(mine.get_whitepaper().as_deref(), Some("Mine, not shared."));
     }
 }

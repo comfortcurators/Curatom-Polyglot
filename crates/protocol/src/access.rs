@@ -26,6 +26,26 @@ pub struct OrganicToken {
     pub created_at: String,
     #[serde(default)]
     pub last_used_at: Option<String>,
+    /// This key's own identity, separate from the token itself -- minted
+    /// once at `create_key` and never rotated (a revoke+recreate mints a
+    /// new one, on purpose: a rotated key is a new key, not the same
+    /// workspace continuing). `serde(default)` so a key created before
+    /// this field existed still loads; it reads as empty, not missing.
+    #[serde(default)]
+    pub workspace_id: String,
+}
+
+/// A named point in a key's own history -- "what state was I working
+/// from." Bounded scope for now: created by hand or by a future
+/// sandbox action, listed, and nothing else yet. What it snapshots (a
+/// repository's manifest ref, a sandbox's working directory) is up to
+/// whoever creates one; this type only carries the identity and the
+/// note describing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub id: String,
+    pub note: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
