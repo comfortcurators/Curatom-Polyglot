@@ -1142,20 +1142,52 @@ impl CuratomKernel {
             .unwrap_or(200)
             .clamp(1, 1000);
 
+        // `ledger` is one D1 table shared by every owner's Durable Object --
+        // there is no per-tenant database. Without this, `WHERE 1=1` (the
+        // query this replaced) returned every owner's knock content to
+        // whichever account asked, which is how a brand-new account's
+        // Billboard was showing the founder's own Reek activity from days
+        // earlier. The only ownership fact D1 has no way to know on its
+        // own is which key_hash belongs to which account -- that lives in
+        // this DO's own kernel storage -- so it's supplied here as an
+        // explicit allowlist rather than trusted from the query string.
+        let owned_hashes: Vec<String> = {
+            let k = self.kernel.borrow();
+            match k.as_ref() {
+                Some(k) => k
+                    .list_keys()
+                    .iter()
+                    .map(|t| curatom_crypto::sha256_hex(t.token.as_bytes()))
+                    .collect(),
+                None => return (503, json!({ "error": "kernel_not_ready" })),
+            }
+        };
+        if owned_hashes.is_empty() {
+            return (200, json!({ "entries": [] }));
+        }
+        if !key_hash.is_empty() && !owned_hashes.contains(&key_hash) {
+            return (403, json!({ "error": "not_your_key" }));
+        }
+        let scoped_hashes: &[String] = if key_hash.is_empty() {
+            &owned_hashes
+        } else {
+            std::slice::from_ref(&key_hash)
+        };
+
         let db = match self.env.d1("CURATOM_LEDGER") {
             Ok(d) => d,
             Err(e) => return (500, json!({ "error": format!("d1: {e}") })),
         };
 
-        let mut sql = String::from(
+        let placeholders = scoped_hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut sql = format!(
             "SELECT id, key_hash, key_label, session_id, round, kind, \
-             body_ref, knock_id, created_at, seq FROM ledger WHERE 1=1",
+             body_ref, knock_id, created_at, seq FROM ledger WHERE key_hash IN ({placeholders})",
         );
-        let mut binds: Vec<wasm_bindgen::JsValue> = Vec::new();
-        if !key_hash.is_empty() {
-            sql.push_str(" AND key_hash = ?");
-            binds.push(wasm_bindgen::JsValue::from_str(&key_hash));
-        }
+        let mut binds: Vec<wasm_bindgen::JsValue> = scoped_hashes
+            .iter()
+            .map(|h| wasm_bindgen::JsValue::from_str(h))
+            .collect();
         if !kind_filter.is_empty() {
             sql.push_str(" AND kind = ?");
             binds.push(wasm_bindgen::JsValue::from_str(&kind_filter));
@@ -1194,6 +1226,36 @@ impl CuratomKernel {
         };
         if ref_str.len() > 512 || ref_str.contains("..") {
             return (400, json!({ "error": "bad_ref" }));
+        }
+        // The `..`/length checks above stop path traversal; they say
+        // nothing about whose content this is. `CURATOM_ARTIFACTS` is one
+        // bucket shared by every owner, and every ledger body is stored at
+        // `ledger/{key_hash}/{session_id}/{round}-{note_id}.txt` -- so the
+        // key_hash is right there in the ref, self-describing, and this is
+        // the same check `h_billboard` above makes: the ref is only served
+        // if that key_hash is one of this owner's own keys. Without this,
+        // any signed-in account could hand back any `ref` value seen
+        // anywhere (another owner's Billboard, a guess, a log line) and
+        // read that owner's private knock content directly, regardless of
+        // whether the listing itself was scoped.
+        let requested_key_hash = ref_str
+            .strip_prefix("ledger/")
+            .and_then(|rest| rest.split('/').next());
+        let owns_it = match requested_key_hash {
+            Some(h) => {
+                let k = self.kernel.borrow();
+                match k.as_ref() {
+                    Some(k) => k
+                        .list_keys()
+                        .iter()
+                        .any(|t| curatom_crypto::sha256_hex(t.token.as_bytes()) == h),
+                    None => return (503, json!({ "error": "kernel_not_ready" })),
+                }
+            }
+            None => false,
+        };
+        if !owns_it {
+            return (403, json!({ "error": "not_your_ref" }));
         }
         let bucket = match self.env.bucket("CURATOM_ARTIFACTS") {
             Ok(b) => b,
