@@ -25,7 +25,7 @@ use curatom_attestation::{hmac_hex, hmac_key_bytes, AttestationClaims};
 use curatom_key_kernel::Kernel;
 use curatom_organic_router::{activity_view, approval_view, intent_view, me_view};
 use curatom_protocol::{
-    ApprovalDecision, ConnectorHeader, Duration as CuratomDuration, HttpRequestDto,
+    ApprovalDecision, Connector, ConnectorHeader, Duration as CuratomDuration, HttpRequestDto,
     InorganicRequest, KnockStatus, OrganicToken, Outcome, OwnerRecord, Permission,
 };
 use curatom_substrate_cloudflare::{
@@ -133,6 +133,59 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
         let owner_key = token
             .as_deref()
+            .and_then(owner_key_from_token)
+            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
+        let ns = env.durable_object("CURATOM_KERNEL")?;
+        let id = ns.id_from_name(&owner_key)?;
+        return id.get_stub()?.fetch_with_request(req).await;
+    }
+    // Same trap as the two routes above, found while wiring Valhalla to a
+    // per-key workspace rather than the founder's singleton: this route
+    // carries a bearer token but no session cookie either, and every one
+    // of these fell through to the generic session-or-`CURATOM_OWNER_ID`
+    // routing below -- silently checking a non-founder's key against the
+    // *founder's* kernel instance, which has never heard of it. That made
+    // Valhalla provisioning (and the internal calls it makes mid-session)
+    // return `token_not_recognized` for literally every key but the
+    // founder's, regardless of whether the key was real.
+    if req.path() == "/organic/keys/verify" && req.method() == Method::Get {
+        let url = req.url()?;
+        let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
+        let owner_key = token
+            .as_deref()
+            .and_then(owner_key_from_token)
+            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
+        let ns = env.durable_object("CURATOM_KERNEL")?;
+        let id = ns.id_from_name(&owner_key)?;
+        return id.get_stub()?.fetch_with_request(req).await;
+    }
+    if req.path() == "/internal/authorize-provision" && req.method() == Method::Post {
+        // form-encoded, in the query string on this one (Valhalla builds
+        // it that way, see workers/valhalla/src/index.ts) -- no body
+        // rebuild needed, unlike /inorganic/submit below.
+        let url = req.url()?;
+        let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
+        let owner_key = token
+            .as_deref()
+            .and_then(owner_key_from_token)
+            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
+        let ns = env.durable_object("CURATOM_KERNEL")?;
+        let id = ns.id_from_name(&owner_key)?;
+        return id.get_stub()?.fetch_with_request(req).await;
+    }
+    if (req.path() == "/internal/freeze" || req.path() == "/internal/release-session")
+        && req.method() == Method::Post
+    {
+        // Neither call carries the raw token, only `session_id` (the
+        // Valhalla sandbox id, `vh-<workspace_id>`) -- which is exactly
+        // why `workspace_id` is minted with the same owner-prefix shape
+        // as `token` itself. Strip the `vh-` Valhalla adds and the same
+        // `owner_key_from_token` parse recovers the owner.
+        let url = req.url()?;
+        let session_id = url.query_pairs().find(|(k, _)| k == "session_id").map(|(_, v)| v.into_owned());
+        let owner_key = session_id
+            .as_deref()
+            .and_then(|s| s.strip_prefix("vh-"))
             .and_then(owner_key_from_token)
             .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
         let ns = env.durable_object("CURATOM_KERNEL")?;
@@ -384,6 +437,13 @@ impl DurableObject for CuratomKernel {
                     .trim_end_matches("/manifest")
                     .to_string();
                 self.h_repository_manifest(&hr, &id).await
+            }
+            ("POST", p) if p.starts_with("/organic/repositories/") && p.ends_with("/upload") => {
+                let id = p
+                    .trim_start_matches("/organic/repositories/")
+                    .trim_end_matches("/upload")
+                    .to_string();
+                self.h_upload_repository(&hr, &id).await
             }
             _ => (404, json!({ "error": "not_found" })),
         };
@@ -836,11 +896,14 @@ impl CuratomKernel {
         let Some(k) = k.as_ref() else {
             return (503, json!({ "error": "kernel_not_ready" }));
         };
-        if k.token_matches(&token) {
-            (200, json!({ "ok": true }))
-        } else {
-            (401, json!({ "error": "token_not_recognized" }))
+        if !k.token_matches(&token) {
+            return (401, json!({ "error": "token_not_recognized" }));
         }
+        // `workspace_id` is what lets Valhalla key a sandbox to this
+        // *key's* persistent workspace rather than to one-off knock ids --
+        // see the doc comment on `/valhalla/provision`'s sandboxId choice.
+        let workspace_id = k.get_key(&token).map(|t| t.workspace_id).unwrap_or_default();
+        (200, json!({ "ok": true, "workspace_id": workspace_id }))
     }
 
     async fn h_valhalla_sessions(&self, hr: &HttpRequestDto) -> Reply {
@@ -1560,6 +1623,9 @@ impl CuratomKernel {
             for r in k.list_repositories() {
                 resources.push(json!(format!("repository.{}", r.id)));
             }
+            for c in k.list_connectors() {
+                resources.push(json!(format!("compute.{}", c.id)));
+            }
             if let Some(obj) = form.as_object_mut() {
                 obj.insert("available_resources".into(), json!(resources));
             }
@@ -2272,6 +2338,108 @@ impl CuratomKernel {
             Err(e) => (500, json!({ "error": format!("get: {e}") })),
         }
     }
+
+    /// The other half of "how a user can upload their repositories" --
+    /// `h_sync_repository` pulls from GitHub; this takes the files
+    /// directly from the caller and writes the exact same manifest shape
+    /// to the exact same R2 path, so `h_repository_manifest` and
+    /// `execute_locally`'s `repository.<id>` read cannot tell the two
+    /// apart. Re-uploading (same repository id) is how it's *updated* --
+    /// `mark_repository_synced` just overwrites, same as a re-sync.
+    async fn h_upload_repository(&self, hr: &HttpRequestDto, id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let owner_id = self.owner_id.borrow().clone();
+        {
+            let k = self.kernel.borrow();
+            let Some(k) = k.as_ref() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            if k.get_repository(id).is_none() {
+                return (404, json!({ "error": "unknown_repository" }));
+            }
+        }
+        #[derive(Deserialize)]
+        struct FileIn {
+            path: String,
+            content: String,
+        }
+        #[derive(Deserialize)]
+        struct Body {
+            #[serde(default)]
+            files: Vec<FileIn>,
+        }
+        let body: Body = match serde_json::from_str(&hr.body) {
+            Ok(v) => v,
+            Err(_) => return (400, json!({ "error": "invalid_json" })),
+        };
+        if body.files.is_empty() {
+            return (400, json!({ "error": "no_files" }));
+        }
+        // Untrusted caller input landing directly in R2 -- bounded the
+        // same way a knock's fields are bounded in key-kernel, since
+        // nothing else here validates size before it's written.
+        if body.files.len() > 500 {
+            return (400, json!({ "error": "too_many_files" }));
+        }
+        let mut total_bytes: usize = 0;
+        for f in &body.files {
+            if f.path.is_empty() || f.path.len() > 512 || f.path.contains("..") {
+                return (400, json!({ "error": format!("bad_path:{}", f.path) }));
+            }
+            if f.content.len() > 2_000_000 {
+                return (400, json!({ "error": format!("file_too_large:{}", f.path) }));
+            }
+            total_bytes += f.content.len();
+        }
+        if total_bytes > 20_000_000 {
+            return (400, json!({ "error": "upload_too_large" }));
+        }
+
+        let files_meta: Vec<Value> = body
+            .files
+            .iter()
+            .map(|f| json!({ "path": f.path, "size": f.content.len() }))
+            .collect();
+        let manifests: Vec<Value> = body
+            .files
+            .iter()
+            .map(|f| json!({ "path": f.path, "content": f.content }))
+            .collect();
+        let repo_name = {
+            let k = self.kernel.borrow();
+            k.as_ref().and_then(|k| k.get_repository(id)).map(|r| r.name).unwrap_or_default()
+        };
+        let manifest_doc = json!({
+            "repository": repo_name,
+            "source": "upload",
+            "synced_at": CloudflareClock.now_iso(),
+            "file_count": body.files.len(),
+            "files": files_meta,
+            "manifests": manifests,
+        });
+        let manifest_ref = format!("repos/{owner_id}/{id}/manifest.json");
+        let bucket = match self.env.bucket("CURATOM_ARTIFACTS") {
+            Ok(b) => b,
+            Err(e) => return (500, json!({ "error": format!("bucket: {e}") })),
+        };
+        if let Err(e) = bucket
+            .put(&manifest_ref, manifest_doc.to_string().into_bytes())
+            .execute()
+            .await
+        {
+            return (500, json!({ "error": format!("r2_put: {e}") }));
+        }
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.mark_repository_synced(id, body.files.len(), manifest_ref).await {
+            Ok(r) => (200, repository_view(&r)),
+            Err(e) => (404, json!({ "error": e })),
+        }
+    }
 }
 
 /// `github_token` is a live credential -- never returned to the
@@ -2318,6 +2486,7 @@ fn locally_dispatchable(resource: &str) -> bool {
         || resource == curatom_resource_registry::REPOSITORY_INVENTORY
         || (resource.starts_with("repository.")
             && resource != curatom_resource_registry::REPOSITORY_INVENTORY)
+        || resource.starts_with("compute.")
 }
 
 /// Runs a `locally_dispatchable` resource against this owner's own
@@ -2375,7 +2544,56 @@ async fn execute_locally(
             None => (false, None, Some("unknown_repository".into())),
         };
     }
+    if let Some(id) = resource.strip_prefix("compute.") {
+        let Some(conn) = k.get_connector(id) else {
+            return (false, None, Some("unknown_connector".into()));
+        };
+        return match op {
+            // A knock carries no payload -- see the identical limitation
+            // on `company.whitepaper`'s write arm above -- so a "write" to
+            // a connector cannot yet mean "send this body". What it *can*
+            // mean honestly, and what this does, is call the connector
+            // exactly as configured (its own endpoint, its own stored
+            // headers) and report what came back. This is real outbound
+            // I/O against an owner-supplied URL, same trust boundary as
+            // `h_sync_repository`'s GitHub calls.
+            Permission::Read | Permission::Write => call_connector(&conn).await,
+        };
+    }
     (false, None, Some("not_locally_dispatchable".into()))
+}
+
+/// Calls a user-defined connector exactly as this owner configured it --
+/// their endpoint, their headers, nothing this Worker adds or infers.
+/// Response body is captured up to a bound so a runaway endpoint cannot
+/// blow up the `Outcome` this gets folded into.
+async fn call_connector(conn: &Connector) -> (bool, Option<Value>, Option<String>) {
+    let headers = Headers::new();
+    for h in &conn.headers {
+        if headers.set(&h.name, &h.value).is_err() {
+            return (false, None, Some(format!("bad_header:{}", h.name)));
+        }
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    let req = match Request::new_with_init(&conn.endpoint, &init) {
+        Ok(r) => r,
+        Err(e) => return (false, None, Some(format!("bad_endpoint: {e}"))),
+    };
+    match Fetch::Request(req).send().await {
+        Ok(mut resp) => {
+            let status = resp.status_code();
+            let text = resp.text().await.unwrap_or_default();
+            let body: Value = serde_json::from_str(&text)
+                .unwrap_or_else(|_| json!(text.chars().take(4000).collect::<String>()));
+            if status < 400 {
+                (true, Some(json!({ "status": status, "body": body })), None)
+            } else {
+                (false, Some(json!({ "status": status, "body": body })), Some(format!("connector_status_{status}")))
+            }
+        }
+        Err(e) => (false, None, Some(format!("connector_unreachable: {e}"))),
+    }
 }
 
 /// Contract 2's one POST. Service binding, not a public URL.

@@ -34,6 +34,7 @@ export default {
         `https://kernel/organic/keys/verify?token=${encodeURIComponent(token)}`
       );
       if (!verify.ok) return jsonErr(401, "token_not_recognized");
+      const verifyBody = (await verify.json()) as { workspace_id?: string };
 
       const scope = (params.get("scope") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
       if (scope.length === 0) return jsonErr(400, "missing_scope");
@@ -59,9 +60,32 @@ export default {
         return jsonErr(403, `provision_not_authorized:${detail}`);
       }
 
-      const sandboxId = `vh-${knock_id}`;
+      // Keyed on this *key's* own workspace, not the one-off knock id --
+      // so every knock approved against the same key reaches the same
+      // persistent container and its filesystem, matching "compute & data
+      // under their workspace id" rather than a fresh throwaway sandbox
+      // per approval. `workspace_id` carries the same owner-prefix shape
+      // as `token` (see key-kernel's `create_key`), which is also what
+      // lets `/internal/freeze` and `/internal/release-session` below
+      // recover the right owner from `session_id` alone. Falls back to
+      // the old per-knock id only for a token minted before this field
+      // existed (`workspace_id` empty via `serde(default)`).
+      const sandboxId = verifyBody.workspace_id ? `vh-${verifyBody.workspace_id}` : `vh-${knock_id}`;
       // SDK: get-or-create. Container starts on first exec, not here.
       const sandbox = getSandbox(env.Sandbox, sandboxId);
+
+      // If this knock also named a repository, materialize what's
+      // actually stored for it (the manifest `h_sync_repository` or
+      // `h_upload_repository` wrote to R2) into the workspace before
+      // handing it back -- "data under their workspace id" made literal,
+      // not just a claim. Best-effort: a sandbox with no repository
+      // requested, or one whose manifest read fails, still provisions.
+      const repositoryId = params.get("repository_id");
+      let materialized: string[] = [];
+      if (repositoryId) {
+        materialized = await materializeRepository(env, sandbox, token, repositoryId);
+        await appendLog(env, sandboxId, "materialize", repositoryId, `${materialized.length} files`);
+      }
 
       const freezeIds: string[] = [];
       for (const resource of scope) {
@@ -96,8 +120,10 @@ export default {
 
       return jsonOk({
         sandbox_id: sandboxId,
+        workspace_id: verifyBody.workspace_id ?? null,
         url: `${env.VALHALLA_BASE_URL}/valhalla/${sandboxId}`,
         frozen: freezeIds,
+        materialized,
       });
     }
 
@@ -342,4 +368,45 @@ async function sessionLog(env: Env, sandboxId: string): Promise<unknown[]> {
      ORDER BY at ASC`
   ).bind(sandboxId).all();
   return res.results ?? [];
+}
+
+/// Writes a repository's stored manifest into the sandbox's own
+/// filesystem, so "compute & data under their workspace id" is literal
+/// rather than a claim. Reads R2 directly at the exact path
+/// `h_sync_repository`/`h_upload_repository` write to
+/// (`repos/{owner_id}/{id}/manifest.json`) instead of calling a route on
+/// `CURATOM_KERNEL`, because every organic repository route requires a
+/// session cookie and this call carries only a bearer token -- the same
+/// reason `workspace_id` was given the token's own owner-prefix shape.
+/// `owner_id` here comes from the *verified* token's own prefix, never
+/// from anything the caller can otherwise choose, so this cannot be
+/// asked to materialize a different owner's repository.
+async function materializeRepository(
+  env: Env,
+  sandbox: ReturnType<typeof getSandbox>,
+  token: string,
+  repositoryId: string,
+): Promise<string[]> {
+  const ownerId = token.split(".")[0];
+  if (!ownerId) return [];
+  const manifestRef = `repos/${ownerId}/${repositoryId}/manifest.json`;
+  const obj = await env.CURATOM_ARTIFACTS.get(manifestRef);
+  if (!obj) return [];
+  let manifest: { manifests?: { path: string; content: string }[] };
+  try {
+    manifest = JSON.parse(await obj.text());
+  } catch {
+    return [];
+  }
+  const written: string[] = [];
+  for (const f of (manifest.manifests ?? []).slice(0, 200)) {
+    if (!f.path || f.path.includes("..")) continue;
+    try {
+      await sandbox.writeFile(f.path, f.content);
+      written.push(f.path);
+    } catch {
+      // One bad file must not fail provisioning for the rest.
+    }
+  }
+  return written;
 }

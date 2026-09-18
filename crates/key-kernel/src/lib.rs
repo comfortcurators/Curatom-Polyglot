@@ -442,8 +442,14 @@ where
             // Minted once, here, and never rotated -- see the field's own
             // doc comment in curatom-protocol for why a revoke+recreate is
             // deliberately a new workspace rather than the old one
-            // continuing under a new token.
-            workspace_id: random_id("ws"),
+            // continuing under a new token. Carries the same owner-prefix
+            // shape as `token` itself (`"{owner_id}.{random}"`) for the
+            // same reason: Valhalla's sandbox id is derived from this, and
+            // a machine reaching that sandbox has no session cookie either
+            // -- see `owner_key_from_token` and its use on
+            // `/internal/freeze` and `/internal/release-session` in
+            // `workers/api/src/lib.rs`.
+            workspace_id: format!("{}.{}", self.owner_id, random_id("ws")),
         };
         {
             let st = self.st_mut()?;
@@ -826,6 +832,10 @@ where
             .unwrap_or_default();
         v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         v
+    }
+
+    pub fn get_connector(&self, id: &str) -> Option<Connector> {
+        self.st().ok()?.connectors.get(id).cloned()
     }
 
     pub async fn create_connector(
