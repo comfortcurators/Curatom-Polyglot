@@ -265,17 +265,34 @@ pub async fn frozen_list() -> ApiResult<Vec<Frozen>> {
 struct RegisterBody<'a> {
     email: &'a str,
     password: &'a str,
+    username: &'a str,
 }
 
 /// `password` is chosen here, not minted after verification -- see
 /// `auth_users.rs`'s header for why: a password minted on the verify
 /// link's GET response is a secret handed to whichever request follows
 /// that link first, and mail providers' own link scanners fetch it
-/// before a human ever can.
-pub async fn register(email: &str, password: &str) -> ApiResult<()> {
+/// before a human ever can. `username` is empty for "mint one from the
+/// email", same as before this field existed.
+pub async fn register(email: &str, password: &str, username: &str) -> ApiResult<()> {
     let _: serde_json::Value =
-        post("/auth/register", &RegisterBody { email, password }, 202).await?;
+        post("/auth/register", &RegisterBody { email, password, username }, 202).await?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsernameAvailability {
+    pub available: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub async fn username_available(username: &str) -> ApiResult<UsernameAvailability> {
+    get(&format!(
+        "/auth/username/available?u={}",
+        js_sys::encode_uri_component(username)
+    ))
+    .await
 }
 
 #[derive(Serialize)]

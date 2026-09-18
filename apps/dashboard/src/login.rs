@@ -3,12 +3,22 @@
 //! curatom-kernel mints the username and password after ZeptoMail
 //! verification), and "check your email" after registering.
 
+use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::api;
 use crate::passkey_browser;
 use crate::turnstile::TurnstileGate;
+
+#[derive(Clone, Copy, PartialEq)]
+enum UsernameCheck {
+    Idle,
+    Checking,
+    Available,
+    Taken,
+    Invalid,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -26,6 +36,9 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
     let password = RwSignal::new(String::new());
     let register_email = RwSignal::new(String::new());
     let register_password = RwSignal::new(String::new());
+    let register_username = RwSignal::new(String::new());
+    let username_check = RwSignal::new(UsernameCheck::Idle);
+    let username_generation = RwSignal::new(0u32);
     let forgot_email = RwSignal::new(String::new());
     let turnstile_token = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
@@ -84,9 +97,46 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
         });
     };
 
+    let on_username_input = move |ev: web_sys::Event| {
+        let value = event_target_value(&ev);
+        register_username.set(value.clone());
+        let my_gen = username_generation.get() + 1;
+        username_generation.set(my_gen);
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            username_check.set(UsernameCheck::Idle);
+            return;
+        }
+        username_check.set(UsernameCheck::Checking);
+        spawn_local(async move {
+            // Debounced: wait for typing to pause, then bail if another
+            // keystroke already started a newer check -- otherwise a
+            // slow response for an earlier, already-stale value could
+            // land after a faster one for the current value and flash
+            // the wrong verdict.
+            TimeoutFuture::new(400).await;
+            if username_generation.get() != my_gen {
+                return;
+            }
+            let result = api::username_available(&trimmed).await;
+            if username_generation.get() != my_gen {
+                return;
+            }
+            match result {
+                Ok(a) if a.available => username_check.set(UsernameCheck::Available),
+                Ok(a) if a.reason.as_deref() == Some("invalid_format") => {
+                    username_check.set(UsernameCheck::Invalid)
+                }
+                Ok(_) => username_check.set(UsernameCheck::Taken),
+                Err(_) => username_check.set(UsernameCheck::Idle),
+            }
+        });
+    };
+
     let do_register = move || {
         let email = register_email.get();
         let password = register_password.get();
+        let username = register_username.get();
         if email.trim().is_empty() {
             error.set(Some("Enter your email.".into()));
             return;
@@ -95,6 +145,23 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
             error.set(Some("Password must be at least 8 characters.".into()));
             return;
         }
+        if !username.trim().is_empty() {
+            match username_check.get() {
+                UsernameCheck::Taken => {
+                    error.set(Some("That username is taken.".into()));
+                    return;
+                }
+                UsernameCheck::Invalid => {
+                    error.set(Some("Username must be 3-32 characters: letters, numbers, - or _.".into()));
+                    return;
+                }
+                UsernameCheck::Checking => {
+                    error.set(Some("Still checking that username -- wait a moment.".into()));
+                    return;
+                }
+                UsernameCheck::Idle | UsernameCheck::Available => {}
+            }
+        }
         let Some(_) = turnstile_token.get() else {
             error.set(Some("Complete the verification above first.".into()));
             return;
@@ -102,7 +169,7 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            match api::register(&email, &password).await {
+            match api::register(&email, &password, &username).await {
                 Ok(()) => {
                     mode.set(Mode::CheckEmail);
                     busy.set(false);
@@ -194,7 +261,7 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                 <div style="display:flex;flex-direction:column;gap:10px">
                     <p class="dim" style="font-size:14px;line-height:1.6;margin:0 0 4px">
                         "Choose your password now. Curatom sends a verification link -- "
-                        "follow it to activate your account; your username is minted from your email."
+                        "follow it to activate your account."
                     </p>
                     <input
                         class="input"
@@ -209,6 +276,19 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                         prop:value=move || register_password.get()
                         on:input=move |ev| register_password.set(event_target_value(&ev))
                     />
+                    <input
+                        class="input"
+                        placeholder="Username (optional -- leave blank to get one minted from your email)"
+                        prop:value=move || register_username.get()
+                        on:input=on_username_input
+                    />
+                    {move || match username_check.get() {
+                        UsernameCheck::Checking => Some(view! { <p class="dim" style="margin:0;font-size:12px">"checking…"</p> }.into_any()),
+                        UsernameCheck::Available => Some(view! { <p style="margin:0;font-size:12px;color:#4ade80">"available"</p> }.into_any()),
+                        UsernameCheck::Taken => Some(view! { <p class="err" style="margin:0;font-size:12px">"already taken"</p> }.into_any()),
+                        UsernameCheck::Invalid => Some(view! { <p class="err" style="margin:0;font-size:12px">"3-32 characters: letters, numbers, - or _"</p> }.into_any()),
+                        UsernameCheck::Idle => None,
+                    }}
                     <TurnstileGate on_token=Callback::new(move |t| turnstile_token.set(Some(t))) />
                     <button class="btn" style="padding:14px" disabled=move || busy.get() on:click=move |_| do_register()>
                         {move || if busy.get() { "…" } else { "REGISTER" }}
@@ -303,6 +383,10 @@ fn readable_register_error(raw: &str) -> String {
         "That doesn't look like a real email address.".into()
     } else if raw.contains("password_too_short") {
         "Password must be at least 8 characters.".into()
+    } else if raw.contains("username_taken") {
+        "That username is taken. Try a different one.".into()
+    } else if raw.contains("invalid_username") {
+        "Username must be 3-32 characters: letters, numbers, - or _.".into()
     } else if raw.contains("email_not_configured") || raw.contains("email_send_failed") {
         "Could not send the verification email. Try again shortly.".into()
     } else {

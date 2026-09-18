@@ -66,6 +66,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.path() == "/auth/verify" && req.method() == Method::Get {
         return auth_users::handle_verify(req, &env).await;
     }
+    if req.path() == "/auth/username/available" && req.method() == Method::Get {
+        return auth_users::handle_username_available(req, &env).await;
+    }
     if req.path() == "/auth/login" && req.method() == Method::Post {
         return auth_users::handle_login(req, &env).await;
     }

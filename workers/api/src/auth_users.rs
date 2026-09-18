@@ -51,6 +51,10 @@ struct RegisterBody {
     email: String,
     #[serde(default)]
     password: String,
+    /// Empty string (the default) means "mint one from the email" --
+    /// unchanged from before this field existed.
+    #[serde(default)]
+    username: String,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +111,58 @@ async fn email_is_registered(env: &Env, email: &str) -> Result<bool> {
         .bind(&[email.into()])?;
     let row: Option<Row> = stmt.first(None).await?;
     Ok(row.is_some())
+}
+
+const MIN_USERNAME_LEN: usize = 3;
+const MAX_USERNAME_LEN: usize = 32;
+
+/// Lowercase, `[a-z0-9_-]` only, 3-32 characters -- the same shape
+/// `mint_username` already produces automatically, just chosen by hand
+/// instead. Returns `None` for anything that doesn't fit that shape;
+/// the caller turns that into a specific error, this just says yes/no.
+fn normalize_chosen_username(raw: &str) -> Option<String> {
+    let u = raw.trim().to_lowercase();
+    if u.len() < MIN_USERNAME_LEN || u.len() > MAX_USERNAME_LEN {
+        return None;
+    }
+    if !u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return None;
+    }
+    if !u.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
+        return None;
+    }
+    Some(u)
+}
+
+async fn username_taken(env: &Env, username: &str) -> Result<bool> {
+    let db = env.d1("CURATOM_LEDGER")?;
+    #[derive(Deserialize)]
+    struct Row {
+        #[allow(dead_code)]
+        username: String,
+    }
+    let row: Option<Row> = db
+        .prepare("SELECT username FROM users WHERE username = ?1 LIMIT 1")
+        .bind(&[username.into()])?
+        .first(None)
+        .await?;
+    Ok(row.is_some())
+}
+
+/// The live check the register form calls as someone types. This is an
+/// advisory answer, not the gate -- `users.username` carries its own
+/// `UNIQUE` constraint in D1, which is what actually decides at the
+/// moment `handle_verify` writes the row, closing the gap between "was
+/// free when I checked" and "is free right now" that this endpoint
+/// alone could never close.
+pub async fn handle_username_available(req: Request, env: &Env) -> Result<Response> {
+    let url = req.url()?;
+    let raw = url.query_pairs().find(|(k, _)| k == "u").map(|(_, v)| v.into_owned()).unwrap_or_default();
+    let Some(username) = normalize_chosen_username(&raw) else {
+        return json_response(200, json!({ "available": false, "reason": "invalid_format" }));
+    };
+    let taken = username_taken(env, &username).await?;
+    json_response(200, json!({ "available": !taken, "username": username }))
 }
 
 /// Derives a unique username from the email's local part: lowercase,
@@ -280,6 +336,25 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
     if body.password.len() < MIN_PASSWORD_LEN {
         return json_response(400, json!({ "error": "password_too_short", "min_length": MIN_PASSWORD_LEN }));
     }
+    // Optional: an empty string means "mint one from the email", same
+    // as before this existed. A non-empty one that doesn't fit the
+    // shape, or is already taken, is rejected here -- this is only the
+    // friendly pre-check, though; `users.username UNIQUE` is what
+    // actually decides at the moment `handle_verify` writes the row.
+    let chosen_username = if body.username.trim().is_empty() {
+        None
+    } else {
+        let Some(u) = normalize_chosen_username(&body.username) else {
+            return json_response(
+                400,
+                json!({ "error": "invalid_username", "detail": "3-32 characters, letters/numbers/-/_, must start with a letter or number" }),
+            );
+        };
+        if username_taken(env, &u).await? {
+            return json_response(409, json!({ "error": "username_taken" }));
+        }
+        Some(u)
+    };
 
     if email_is_registered(env, &email).await? {
         return json_response(409, json!({ "error": "email_already_registered" }));
@@ -307,7 +382,7 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
         .await?;
 
     db.prepare(
-        "INSERT OR REPLACE INTO pending_verifications (token_hash, email, created_at, expires_at, password_hash, password_salt) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO pending_verifications (token_hash, email, created_at, expires_at, password_hash, password_salt, username) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(&[
         hash.into(),
@@ -316,6 +391,7 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
         ((now + VERIFICATION_TTL_SECONDS) as f64).into(),
         password_hash.into(),
         salt.into(),
+        chosen_username.clone().unwrap_or_default().into(),
     ])?
     .run()
     .await?;
@@ -356,9 +432,11 @@ pub async fn handle_verify(req: Request, env: &Env) -> Result<Response> {
         expires_at: i64,
         password_hash: String,
         password_salt: String,
+        #[serde(default)]
+        username: String,
     }
     let stmt = db
-        .prepare("SELECT email, expires_at, password_hash, password_salt FROM pending_verifications WHERE token_hash = ?1 LIMIT 1")
+        .prepare("SELECT email, expires_at, password_hash, password_salt, username FROM pending_verifications WHERE token_hash = ?1 LIMIT 1")
         .bind(&[hash.into()])?;
     let Some(pending): Option<PendingRow> = stmt.first(None).await? else {
         // No row at all for this token: it was never issued, or it was
@@ -394,7 +472,22 @@ pub async fn handle_verify(req: Request, env: &Env) -> Result<Response> {
         );
     }
 
-    let username = mint_username(env, &pending.email).await?;
+    // D1 serializes writes to one database, so a select-then-insert like
+    // this is race-free the same way it already is elsewhere in this
+    // org's D1-backed code: nothing else can slot a write in between
+    // this check and the INSERT below. `users.username UNIQUE` remains
+    // the real backstop regardless.
+    let username = if !pending.username.is_empty() {
+        if username_taken(env, &pending.username).await? {
+            return json_response(
+                409,
+                json!({ "error": "username_taken_since_registration", "detail": "someone else took it first -- register again with a different one" }),
+            );
+        }
+        pending.username.clone()
+    } else {
+        mint_username(env, &pending.email).await?
+    };
     let user_id = random_id("user");
     let now = now_unix();
 
