@@ -423,8 +423,16 @@ where
         if label.len() > 80 {
             return Err("label_too_long".into());
         }
+        // The prefix used to be a hardcoded "RAJVANSH-" for every
+        // account, not just the founder's -- which also meant nothing in
+        // the token said which owner it belonged to. A machine presenting
+        // a token (a knock) carries no session cookie, ever, so the
+        // Worker-level router has no other way to find this owner's own
+        // Durable Object. Embedding `owner_id` here is what makes that
+        // routing possible without a second index to keep in sync -- see
+        // `fetch()`'s handling of `/inorganic/*` in `workers/api/src/lib.rs`.
         let raw = random_id("tok").to_uppercase().replace('_', "-");
-        let token = format!("RAJVANSH-{raw}");
+        let token = format!("{}.{raw}", self.owner_id);
         let t = OrganicToken {
             token: token.clone(),
             owner_id: self.owner_id.clone(),
@@ -1135,13 +1143,35 @@ mod tests {
     fn token_rotate_kills_old() {
         let mut k = k(1_700_000_000);
         let t1 = pollster::block_on(k.create_key("one".into())).unwrap();
-        assert!(t1.token.starts_with("RAJVANSH-"));
+        assert!(t1.token.starts_with("org_owner."));
         assert!(k.token_matches(&t1.token));
         pollster::block_on(k.revoke_key(&t1.token)).unwrap();
         let t2 = pollster::block_on(k.create_key("two".into())).unwrap();
         assert_ne!(t1.token, t2.token);
         assert!(!k.token_matches(&t1.token));
         assert!(k.token_matches(&t2.token));
+    }
+
+    #[test]
+    fn token_carries_its_owner_for_unauthenticated_machine_routing() {
+        // The whole point of the prefix: a machine presenting this token
+        // has no session cookie, so `fetch()` in the Worker must be able
+        // to recover this Durable Object's own name (`owner_id`) from the
+        // token text alone. If this regresses back to a fixed prefix,
+        // every non-founder account's keys silently stop being reachable
+        // by any knock again -- see workers/api/src/lib.rs's `/inorganic/*`
+        // handling.
+        let mut k = Kernel::new(
+            "user_e659792109db4885a21923e3042ab112".into(),
+            MemoryStateStore::new(),
+            MemoryLedger::new(),
+            MemoryArtifacts::new(),
+            FrozenClock::new(1_700_000_000),
+        );
+        pollster::block_on(k.load()).unwrap();
+        let t = pollster::block_on(k.create_key("mine".into())).unwrap();
+        let recovered_owner = t.token.split_once('.').map(|(prefix, _)| prefix);
+        assert_eq!(recovered_owner, Some("user_e659792109db4885a21923e3042ab112"));
     }
 
     #[test]

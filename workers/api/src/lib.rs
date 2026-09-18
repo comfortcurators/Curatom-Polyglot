@@ -56,7 +56,7 @@ type Reply = (u16, Value);
 const ATTESTATION_TTL_SECONDS: i64 = 300;
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Real per-user accounts: register with an email, verify it, get a
     // minted username and password back. Wired against D1 directly, same
     // as the capability broker above.
@@ -113,6 +113,58 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return passkey::handle_delete(req, &env, &credential_id).await;
     }
 
+    // The machine-facing knock surface. A machine presenting a token has
+    // no session cookie -- never has, never will -- so it cannot be
+    // routed by the session logic below. Before 2026-09-18 this simply
+    // fell through to the founder's own singleton DO regardless of whose
+    // token was presented, so a non-founder account's key looked real
+    // (it listed, it showed a label) but no AI could ever knock with it:
+    // the knock always landed in a kernel that had never heard of that
+    // token, and refused it as unrecognized.
+    //
+    // `Kernel::create_key` now embeds its own `owner_id` as the token's
+    // prefix (`"{owner_id}.{random}"`) specifically so this routing can
+    // happen with no index or lookup: the DO name a knock needs is
+    // sitting right in the token text. Falls back to the founder's
+    // singleton only when no usable token is present at all -- the
+    // previous behaviour, kept as the floor, not the ceiling.
+    if req.path() == "/inorganic/knock" && req.method() == Method::Get {
+        let url = req.url()?;
+        let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
+        let owner_key = token
+            .as_deref()
+            .and_then(owner_key_from_token)
+            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
+        let ns = env.durable_object("CURATOM_KERNEL")?;
+        let id = ns.id_from_name(&owner_key)?;
+        return id.get_stub()?.fetch_with_request(req).await;
+    }
+    if (req.path() == "/inorganic/submit" || req.path() == "/inorganic/handoff")
+        && req.method() == Method::Post
+    {
+        // The token lives in the JSON body here, not the query string,
+        // and reading it consumes the request's body stream -- so the
+        // request has to be rebuilt with the same bytes before it can be
+        // forwarded to the DO, which reads the body again itself.
+        let headers = req.headers().clone();
+        let body_text = req.text().await?;
+        let token = serde_json::from_str::<Value>(&body_text)
+            .ok()
+            .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from));
+        let owner_key = token
+            .as_deref()
+            .and_then(owner_key_from_token)
+            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(wasm_bindgen::JsValue::from_str(&body_text)));
+        let rebuilt = Request::new_with_init(&req.url()?.to_string(), &init)?;
+        let ns = env.durable_object("CURATOM_KERNEL")?;
+        let id = ns.id_from_name(&owner_key)?;
+        return id.get_stub()?.fetch_with_request(rebuilt).await;
+    }
+
     // Which CuratomKernel instance this request reaches. A verified
     // account's session routes to its own instance, named by its own
     // user id -- so "their own account" (dashboard, sandbox/Valhalla,
@@ -130,6 +182,15 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let ns = env.durable_object("CURATOM_KERNEL")?;
     let id = ns.id_from_name(&owner_key)?;
     id.get_stub()?.fetch_with_request(req).await
+}
+
+/// `"{owner_id}.{random}"` -> `owner_id`, or `None` for a token that
+/// doesn't have that shape (an old, pre-migration token; a garbage
+/// value). Never trusted as authorization by itself -- it only decides
+/// *which* Durable Object gets asked, and that DO's own `token_matches`
+/// is what actually accepts or refuses the knock.
+fn owner_key_from_token(token: &str) -> Option<String> {
+    token.split_once('.').map(|(prefix, _)| prefix.to_string()).filter(|p| !p.is_empty())
 }
 
 #[durable_object]
