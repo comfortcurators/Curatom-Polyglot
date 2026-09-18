@@ -9,18 +9,9 @@ interface Env {
   CURATOM_ARTIFACTS: R2Bucket;
   CURATOM_LEDGER: D1Database;
   CURATOM_KERNEL: Fetcher;
-  HOSTOS_MCP: Fetcher;
   VALHALLA_BASE_URL: string;
   CURATOM_KERNEL_HMAC: string;
 }
-
-Sandbox.outboundByHost = {
-  "hostos-mcp.internal": async (request: Request, env: Env) => {
-    const proxied = new Request(request);
-    proxied.headers.set("x-internal-caller", "curatom-valhalla");
-    return env.HOSTOS_MCP.fetch(proxied);
-  },
-};
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -71,9 +62,6 @@ export default {
       const sandboxId = `vh-${knock_id}`;
       // SDK: get-or-create. Container starts on first exec, not here.
       const sandbox = getSandbox(env.Sandbox, sandboxId);
-      await sandbox.setEnvVars({
-        HOSTOS_MCP_URL: "http://hostos-mcp.internal/mcp",
-      });
 
       const freezeIds: string[] = [];
       for (const resource of scope) {

@@ -8,11 +8,10 @@ export class OrchestratorContainer extends Container {
   requiredPorts = [4000];
   sleepAfter = "2h";
   enableInternet = false;
-  allowedHosts = ["curatom.kernel", "hostos-mcp.internal"];
+  allowedHosts = ["curatom.kernel"];
   envVars = {
     PORT: "4000",
     CURATOM_WORKER_URL: "http://curatom.kernel",
-    HOSTOS_MCP_URL: "http://hostos-mcp.internal/mcp",
     CURATOM_HMAC_KEY: env.CURATOM_HMAC_KEY,
   };
 }
@@ -27,11 +26,6 @@ OrchestratorContainer.outboundByHost = {
     url.protocol = "https:";
     url.host = "internal";
     return env.CURATOM_KERNEL_INTERNAL.fetch(new Request(url, request));
-  },
-  "hostos-mcp.internal": async (request, env) => {
-    const proxied = new Request(request);
-    proxied.headers.set("x-internal-caller", "curatom-orchestrator");
-    return env.HOSTOS_MCP.fetch(proxied);
   },
 };
 

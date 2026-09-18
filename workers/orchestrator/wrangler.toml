@@ -22,7 +22,3 @@ new_sqlite_classes = ["OrchestratorContainer"]
 [[services]]
 binding = "CURATOM_KERNEL_INTERNAL"
 service = "curatom-kernel"
-
-[[services]]
-binding = "HOSTOS_MCP"
-service = "hostos-mcp"

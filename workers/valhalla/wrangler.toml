@@ -43,9 +43,5 @@ database_id = "daf59f1c-9003-4bff-92bf-18b15586d523"
 binding = "CURATOM_KERNEL"
 service = "curatom-kernel"
 
-[[services]]
-binding = "HOSTOS_MCP"
-service = "hostos-mcp"
-
 [vars]
 VALHALLA_BASE_URL = "https://valhalla.rajvansh.dev"
