@@ -37,6 +37,11 @@ binding = "CURATOM_LEDGER"
 database_name = "curatom-ledger"
 # Cloudflare team: npx wrangler d1 create curatom-ledger, paste the id here.
 database_id = "daf59f1c-9003-4bff-92bf-18b15586d523"
+# wrangler.toml lives at the repo root, but the crate whose schema this
+# is belongs to (workers/api) does not -- without this, `wrangler d1
+# migrations apply` looks for a `./migrations` next to this file and
+# finds nothing.
+migrations_dir = "workers/api/migrations"
 
 [[r2_buckets]]
 binding = "CURATOM_ARTIFACTS"
@@ -70,8 +75,11 @@ service = "hostos-mcp"
 directory = "./apps/dashboard/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health", "/scratch/*", "/mcp", "/tools/list", "/tools/call"]
+run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health", "/scratch/*", "/mcp", "/tools/list", "/tools/call", "/auth/*"]
 
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"
 VALHALLA_URL = "https://valhalla.rajvansh.dev"
+# Verified sender per ZeptoMail's own console: Domain/Sender Address =
+# rajvansh.dev, so this is the only address that will actually send.
+EMAIL_FROM = "noreply@rajvansh.dev"

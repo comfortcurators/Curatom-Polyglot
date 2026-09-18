@@ -36,6 +36,7 @@ use curatom_ports::Clock;
 use serde_json::{json, Value};
 
 mod auth_users;
+mod mail;
 mod mcp_gateway;
 mod scratchpad;
 pub use scratchpad::Scratchpad;
@@ -67,14 +68,14 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.path() == "/tools/call" {
         return mcp_gateway::handle_tools_call(req, &env).await;
     }
-    // Real per-user accounts. Additive: nothing below this block, and
-    // nothing in `CuratomKernel`, reads a `/auth/*` session yet -- this
-    // is step 1 of the founder's own registration workflow (register,
-    // get a username/password), wired against D1 directly, same as the
-    // capability broker above. Step 2 is giving a registered user their
-    // own workspace; RAJ_TOKEN and Access stay live until that exists.
+    // Real per-user accounts: register with an email, verify it, get a
+    // minted username and password back. Wired against D1 directly, same
+    // as the capability broker above.
     if req.path() == "/auth/register" && req.method() == Method::Post {
         return auth_users::handle_register(req, &env).await;
+    }
+    if req.path() == "/auth/verify" && req.method() == Method::Get {
+        return auth_users::handle_verify(req, &env).await;
     }
     if req.path() == "/auth/login" && req.method() == Method::Post {
         return auth_users::handle_login(req, &env).await;
@@ -85,8 +86,23 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.path() == "/auth/me" && req.method() == Method::Get {
         return auth_users::handle_me(req, &env).await;
     }
+
+    // Which CuratomKernel instance this request reaches. A verified
+    // account's session routes to its own instance, named by its own
+    // user id -- so "their own account" (dashboard, sandbox/Valhalla,
+    // key kernel, knocks, activity) falls out of DO routing alone, with
+    // no change needed to CuratomKernel's own logic: every one of those
+    // faculties is already a method on the same Kernel, previously ever
+    // only reached through the founder's one, singleton instance. No
+    // session present falls back to the original CURATOM_OWNER_ID path
+    // (RAJ_TOKEN, Access) so the founder's own existing entry keeps
+    // working exactly as it did before this existed.
+    let owner_key = match auth_users::resolve_user_session(&req, &env).await {
+        Ok(Some((user_id, _username))) => user_id,
+        _ => env.var("CURATOM_OWNER_ID")?.to_string(),
+    };
     let ns = env.durable_object("CURATOM_KERNEL")?;
-    let id = ns.id_from_name(&env.var("CURATOM_OWNER_ID")?.to_string())?;
+    let id = ns.id_from_name(&owner_key)?;
     id.get_stub()?.fetch_with_request(req).await
 }
 
@@ -95,7 +111,16 @@ pub struct CuratomKernel {
     state: State,
     env: Env,
     kernel: RefCell<Option<K>>,
-    owner_id: String,
+    /// Resolved once per DO instance, not per request: the founder's
+    /// original singleton instance gets it from `CURATOM_OWNER_ID`
+    /// (unchanged); a per-user instance (routed to by that user's own
+    /// session, see `fetch()` above) bootstraps it from the first
+    /// request's identity and persists it to this instance's own
+    /// storage, so it stays fixed for this instance's lifetime even
+    /// though `CURATOM_OWNER_ID` is one Worker-wide value that cannot
+    /// name every user. A `RefCell` because `DurableObject::new` is
+    /// sync and cannot read that storage -- `ensure()` fills it in.
+    owner_id: RefCell<String>,
     hmac_key: Vec<u8>,
     organic_idp: Option<CloudflareAccessIdentityProvider>,
     inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
@@ -106,6 +131,9 @@ impl DurableObject for CuratomKernel {
     fn new(state: State, env: Env) -> Self {
         console_error_panic_hook::set_once();
 
+        // The founder's original default. Real for the singleton
+        // instance; a placeholder for a fresh per-user instance until
+        // `ensure()` bootstraps the real one on its first request.
         let owner_id = env
             .var("CURATOM_OWNER_ID")
             .map(|v| v.to_string())
@@ -123,7 +151,7 @@ impl DurableObject for CuratomKernel {
             state,
             env,
             kernel: RefCell::new(None),
-            owner_id,
+            owner_id: RefCell::new(owner_id),
             hmac_key,
             organic_idp,
             inorganic_idp: ProductionCloudflareInorganicIdentityProvider,
@@ -157,7 +185,7 @@ impl DurableObject for CuratomKernel {
             );
         }
 
-        self.ensure().await?;
+        self.ensure(&hr).await?;
 
         if path.starts_with("/scratch/") {
             return self.route_scratch(&hr).await;
@@ -253,11 +281,49 @@ impl DurableObject for CuratomKernel {
 }
 
 impl CuratomKernel {
-    async fn ensure(&self) -> Result<()> {
+    /// Resolves who this DO instance belongs to, and fixes it permanently
+    /// the first time this specific instance is ever asked. Cloudflare
+    /// starts every Durable Object's storage empty, so "storage already
+    /// has an `owner_id`" is itself the only bootstrap flag needed:
+    ///
+    /// - Already bootstrapped (this instance has answered a request
+    ///   before, whether it's the founder's original singleton or a
+    ///   per-user instance) -- read the stored value back, done.
+    /// - Not yet bootstrapped, and this request carries a verified
+    ///   session -- a brand-new per-user instance's first-ever request,
+    ///   reachable only because `fetch()` above already routed that
+    ///   user's own id here. Adopt it, persist it.
+    /// - Not yet bootstrapped, no session -- the founder's original
+    ///   instance's first-ever request (reached via RAJ_TOKEN/Access,
+    ///   `CURATOM_OWNER_ID` in `new()` already set the in-memory
+    ///   default). Persist that default so future wakes read storage
+    ///   instead of re-deriving it.
+    ///
+    /// Same "first touch establishes ownership" shape as
+    /// `ensureWorkspace()` in HostOS's computer-v2/src/workspace.ts.
+    async fn bootstrap_owner_id(&self, hr: &HttpRequestDto) -> Result<String> {
+        if let Ok(Some(stored)) = self.state.storage().get::<String>("owner_id").await {
+            *self.owner_id.borrow_mut() = stored.clone();
+            return Ok(stored);
+        }
+        let resolved = match auth_users::resolve_user_session_from_cookie(hr.header("cookie"), &self.env)
+            .await
+            .unwrap_or(None)
+        {
+            Some((user_id, _)) => user_id,
+            None => self.owner_id.borrow().clone(),
+        };
+        self.state.storage().put("owner_id", &resolved).await?;
+        *self.owner_id.borrow_mut() = resolved.clone();
+        Ok(resolved)
+    }
+
+    async fn ensure(&self, hr: &HttpRequestDto) -> Result<()> {
         if self.kernel.borrow().is_some() {
             return Ok(());
         }
-        if self.owner_id.is_empty() {
+        let owner_id = self.bootstrap_owner_id(hr).await?;
+        if owner_id.is_empty() {
             return Err(Error::RustError("CURATOM_OWNER_ID not configured".into()));
         }
         if self.hmac_key.is_empty() {
@@ -272,10 +338,10 @@ impl CuratomKernel {
             .ok_or_else(|| Error::RustError("CURATOM_ARTIFACTS bucket missing".into()))?;
 
         let mut k = Kernel::new(
-            self.owner_id.clone(),
+            owner_id.clone(),
             DOStateStore::new(self.state.storage()),
             DOEventLedger::new(self.state.storage()),
-            R2ArtifactStore::new(bucket, self.owner_id.clone()),
+            R2ArtifactStore::new(bucket, owner_id),
             CloudflareClock,
         );
         k.load().await.map_err(Error::RustError)?;
@@ -284,14 +350,29 @@ impl CuratomKernel {
     }
 
     /// Contract 1 is owner-only. Anything short of the owner is a refusal,
-    /// never a downgrade.
+    /// never a downgrade. A verified account's own session authenticates
+    /// it as the owner of its own (per-user) instance, exactly the way
+    /// RAJ_TOKEN/Access already authenticate the founder as the owner of
+    /// the original singleton instance -- same check, two identity
+    /// sources, tried in this order because a session cookie is the more
+    /// specific credential when both happen to be present.
     async fn owner(&self, hr: &HttpRequestDto) -> std::result::Result<(), Reply> {
+        let owner_id = self.owner_id.borrow().clone();
+        if let Ok(Some((user_id, _))) =
+            auth_users::resolve_user_session_from_cookie(hr.header("cookie"), &self.env).await
+        {
+            return if user_id == owner_id {
+                Ok(())
+            } else {
+                Err((403, json!({ "error": "not_owner" })))
+            };
+        }
         let idp = self
             .organic_idp
             .as_ref()
             .ok_or((500, json!({ "error": "idp_uninitialized" })))?;
         match idp.authenticate(hr).await {
-            Ok(Some(id)) if id.id == self.owner_id => Ok(()),
+            Ok(Some(id)) if id.id == owner_id => Ok(()),
             Ok(Some(_)) => Err((403, json!({ "error": "not_owner" }))),
             Ok(None) => Err((401, json!({ "error": "unauthenticated" }))),
             Err(e) => Err((500, json!({ "error": e }))),
@@ -343,6 +424,7 @@ impl CuratomKernel {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
+        let owner_id = self.owner_id.borrow().clone();
         let k = self.kernel.borrow();
         let Some(k) = k.as_ref() else {
             return (503, json!({ "error": "kernel_not_ready" }));
@@ -350,18 +432,16 @@ impl CuratomKernel {
         let owner = k.get_owner();
         let (enrolled, enrolled_at, display_name) = match owner {
             Some(o) => (true, Some(o.claimed_at), o.display_name),
-            None => (false, None, self.owner_id.clone()),
+            None => (false, None, owner_id.clone()),
         };
-        (
-            200,
-            me_view(&self.owner_id, enrolled, enrolled_at, &display_name),
-        )
+        (200, me_view(&owner_id, enrolled, enrolled_at, &display_name))
     }
 
     async fn h_claim(&self, hr: &HttpRequestDto) -> Reply {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
+        let owner_id = self.owner_id.borrow().clone();
         let k = self.kernel.borrow();
         let Some(k) = k.as_ref() else {
             return (503, json!({ "error": "kernel_not_ready" }));
@@ -374,10 +454,10 @@ impl CuratomKernel {
             .get("display_name")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(&self.owner_id)
+            .unwrap_or(&owner_id)
             .to_string();
         let record = OwnerRecord {
-            owner_id: self.owner_id.clone(),
+            owner_id: owner_id.clone(),
             display_name,
             claimed_at: CloudflareClock.now_iso(),
         };
@@ -705,6 +785,33 @@ impl CuratomKernel {
             .iter()
             .any(|r| r == curatom_resource_registry::HOSTOS_MCP)
         {
+            // hostos-mcp is the founder's own Worker -- GITHUB_APP_PRIVATE_KEY,
+            // CLOUDFLARE_API_TOKEN, R2 keys, exec. `self.owner(hr)` above only
+            // proves this caller owns *some* Curatom account; since every
+            // registered account now owns its own CuratomKernel instance (see
+            // `bootstrap_owner_id`), that check alone would let anyone who
+            // signs up approve their own hostos_mcp knock and mint themselves
+            // a real capability row in the one, Worker-wide `capabilities`
+            // table `mcp_gateway.rs` trusts for every caller. This resource is
+            // gated further, on purpose: only the founder's own instance --
+            // the one still named by the literal `CURATOM_OWNER_ID` value, not
+            // a per-user bootstrapped id -- may ever mint one. A regular
+            // account's own knock for this resource is refused here, not
+            // silently downgraded to a smaller grant.
+            let founder_owner_id = self
+                .env
+                .var("CURATOM_OWNER_ID")
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            if self.owner_id.borrow().clone() != founder_owner_id {
+                return (
+                    403,
+                    json!({
+                        "error": "hostos_mcp_founder_only",
+                        "detail": "hostos-mcp access is not available to Curatom accounts.",
+                    }),
+                );
+            }
             let db = match self.env.d1("CURATOM_LEDGER") {
                 Ok(d) => d,
                 Err(e) => return (500, json!({ "error": format!("d1: {e}") })),
@@ -915,7 +1022,7 @@ impl CuratomKernel {
         let Some(text) = body.get("text").and_then(|v| v.as_str()) else {
             return (400, json!({ "error": "missing_text" }));
         };
-        let owner = self.owner_id.clone();
+        let owner = self.owner_id.borrow().clone();
         let mut k = self.kernel.borrow_mut();
         match k.as_mut().unwrap().create_intent(text, &owner).await {
             Ok(intent) => (201, intent_view(&intent)),

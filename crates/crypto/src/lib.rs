@@ -49,6 +49,23 @@ pub fn random_token_hex() -> String {
     hex::encode(buf)
 }
 
+/// Unambiguous alphabet: no `0`/`O`, no `1`/`I`/`l` -- a minted password
+/// gets read off a screen once and typed back in, so every character has
+/// to be unmistakable rather than merely printable.
+const READABLE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz";
+
+/// A random secret of `len` characters drawn from `READABLE_ALPHABET`,
+/// for a credential a human actually has to read and type (a minted
+/// account password), as opposed to `random_token_hex`'s output, which
+/// only ever moves machine-to-machine (a session cookie, a bearer token).
+pub fn random_readable_secret(len: usize) -> String {
+    let mut buf = vec![0u8; len];
+    getrandom::getrandom(&mut buf).expect("getrandom failed");
+    buf.iter()
+        .map(|b| READABLE_ALPHABET[(*b as usize) % READABLE_ALPHABET.len()] as char)
+        .collect()
+}
+
 const PBKDF2_ITERATIONS: u32 = 100_000;
 
 /// PBKDF2-HMAC-SHA256, 100k iterations -- the RustCrypto implementation,
@@ -219,5 +236,19 @@ mod tests {
         let b = random_token_hex();
         assert_ne!(a, b);
         assert_eq!(a.len(), 64, "32 bytes hex-encoded");
+    }
+
+    #[test]
+    fn readable_secrets_avoid_ambiguous_characters() {
+        let s = random_readable_secret(40);
+        assert_eq!(s.len(), 40);
+        for bad in ['0', 'O', '1', 'I', 'l'] {
+            assert!(!s.contains(bad), "unambiguous alphabet must exclude {bad}");
+        }
+    }
+
+    #[test]
+    fn readable_secrets_are_unique() {
+        assert_ne!(random_readable_secret(20), random_readable_secret(20));
     }
 }
