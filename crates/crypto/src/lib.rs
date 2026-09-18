@@ -66,6 +66,15 @@ pub fn random_readable_secret(len: usize) -> String {
         .collect()
 }
 
+/// 32 raw random bytes, for a caller that needs bytes rather than a string
+/// -- a WebAuthn challenge, which the browser wants base64url-encoded and
+/// compares byte-for-byte, not as hex text.
+pub fn random_bytes_32() -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).expect("getrandom failed");
+    buf
+}
+
 const PBKDF2_ITERATIONS: u32 = 100_000;
 
 /// PBKDF2-HMAC-SHA256, 100k iterations -- the RustCrypto implementation,

@@ -171,6 +171,17 @@ fn set_session_cookie(resp: &mut Response, token: &str) -> Result<()> {
     resp.headers_mut().append("Set-Cookie", &cookie)
 }
 
+/// Mints a session for `user_id`, sets it as the response cookie, and
+/// returns the response built from `body` -- the one path both password
+/// login and passkey login end at, so a session is created exactly one
+/// way in this codebase.
+pub async fn create_session_cookie(env: &Env, user_id: &str, body: serde_json::Value) -> Result<Response> {
+    let token = create_session(env, user_id).await?;
+    let mut resp = json_response(200, body)?;
+    set_session_cookie(&mut resp, &token)?;
+    Ok(resp)
+}
+
 fn clear_session_cookie(resp: &mut Response) -> Result<()> {
     let cookie = format!("{USER_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax");
     resp.headers_mut().append("Set-Cookie", &cookie)

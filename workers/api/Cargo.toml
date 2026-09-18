@@ -30,6 +30,7 @@ curatom-inorganic-router = { path = "../../crates/inorganic-router" }
 curatom-attestation = { path = "../../crates/attestation" }
 curatom-substrate-cloudflare = { path = "../../crates/substrate-cloudflare" }
 curatom-resource-registry = { path = "../../crates/resource-registry" }
+curatom-webauthn = { path = "../../crates/webauthn" }
 
 # wasm-opt is an optional size/speed optimization pass, not required for
 # correctness. worker-build tries to download the binaryen release on

@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 
 mod auth_users;
 mod mail;
+mod passkey;
 mod scratchpad;
 pub use scratchpad::Scratchpad;
 
@@ -71,6 +72,24 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
     if req.path() == "/auth/me" && req.method() == Method::Get {
         return auth_users::handle_me(req, &env).await;
+    }
+    // Passkeys. Registering one requires an existing session (you add a
+    // passkey to an account you're already in); logging in with one does
+    // not, since the whole point is arriving with no password.
+    if req.path() == "/auth/passkey/register/begin" && req.method() == Method::Post {
+        return passkey::handle_register_begin(req, &env).await;
+    }
+    if req.path() == "/auth/passkey/register/finish" && req.method() == Method::Post {
+        return passkey::handle_register_finish(req, &env).await;
+    }
+    if req.path() == "/auth/passkey/login/begin" && req.method() == Method::Post {
+        return passkey::handle_login_begin(req, &env).await;
+    }
+    if req.path() == "/auth/passkey/login/finish" && req.method() == Method::Post {
+        return passkey::handle_login_finish(req, &env).await;
+    }
+    if req.path() == "/auth/passkey/list" && req.method() == Method::Get {
+        return passkey::handle_list(req, &env).await;
     }
 
     // Which CuratomKernel instance this request reaches. A verified

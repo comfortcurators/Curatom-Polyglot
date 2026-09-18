@@ -4,6 +4,8 @@ mod counts;
 mod dashboard;
 mod enrollment;
 mod kit;
+mod login;
+mod passkey_browser;
 mod plate_activity;
 mod plate_billboard;
 mod plate_keys;

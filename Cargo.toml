@@ -6,6 +6,7 @@ members = [
     "crates/ports",
     "crates/key-kernel",
     "crates/resource-registry",
+    "crates/webauthn",
     "crates/sign",
     "crates/attestation",
     "crates/execution",

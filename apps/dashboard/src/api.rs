@@ -258,3 +258,176 @@ pub async fn frozen_list() -> ApiResult<Vec<Frozen>> {
     let resp: FrozenResponse = get("/organic/frozen").await?;
     Ok(resp.frozen)
 }
+
+// ---- auth: register, verify (via the emailed link, not this app), login ----
+
+#[derive(Serialize)]
+struct RegisterBody<'a> {
+    email: &'a str,
+}
+
+pub async fn register(email: &str) -> ApiResult<()> {
+    let _: serde_json::Value = post("/auth/register", &RegisterBody { email }, 202).await?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct LoginBody<'a> {
+    username_or_email: &'a str,
+    password: &'a str,
+}
+
+pub async fn login(username_or_email: &str, password: &str) -> ApiResult<()> {
+    let _: serde_json::Value = post(
+        "/auth/login",
+        &LoginBody { username_or_email, password },
+        200,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn logout() -> ApiResult<()> {
+    post_empty("/auth/logout", 200).await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthUser {
+    #[allow(dead_code)]
+    pub id: String,
+    #[allow(dead_code)]
+    pub username: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AuthMeResponse {
+    user: AuthUser,
+}
+
+/// Whether the browser holds a valid session at all -- `Ok` for signed in,
+/// `Err` for anonymous. Distinct from `me()`: that one asks *founder's
+/// singleton Kernel* "who is this" and is answered via RAJ_TOKEN/Access;
+/// this one asks the account system directly.
+pub async fn auth_me() -> ApiResult<AuthUser> {
+    let resp: AuthMeResponse = get("/auth/me").await?;
+    Ok(resp.user)
+}
+
+// ---- passkeys ----
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasskeyRegisterChallenge {
+    pub challenge: String,
+    pub rp_id: String,
+    pub user_id: String,
+    pub username: String,
+}
+
+pub async fn passkey_register_begin() -> ApiResult<PasskeyRegisterChallenge> {
+    let resp: serde_json::Value =
+        post_empty_want("/auth/passkey/register/begin", 200).await?;
+    serde_json::from_value(resp).map_err(|e| ApiError(format!("passkey/register/begin: {e}")))
+}
+
+#[derive(Serialize)]
+struct PasskeyRegisterFinishBody<'a> {
+    challenge: &'a str,
+    client_data_json: &'a str,
+    attestation_object: &'a str,
+    label: &'a str,
+}
+
+pub async fn passkey_register_finish(
+    challenge: &str,
+    client_data_json: &str,
+    attestation_object: &str,
+    label: &str,
+) -> ApiResult<()> {
+    let _: serde_json::Value = post(
+        "/auth/passkey/register/finish",
+        &PasskeyRegisterFinishBody { challenge, client_data_json, attestation_object, label },
+        201,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasskeyLoginChallenge {
+    pub challenge: String,
+    pub rp_id: String,
+}
+
+pub async fn passkey_login_begin() -> ApiResult<PasskeyLoginChallenge> {
+    let resp: serde_json::Value = post_empty_want("/auth/passkey/login/begin", 200).await?;
+    serde_json::from_value(resp).map_err(|e| ApiError(format!("passkey/login/begin: {e}")))
+}
+
+#[derive(Serialize)]
+struct PasskeyLoginFinishBody<'a> {
+    challenge: &'a str,
+    credential_id: &'a str,
+    client_data_json: &'a str,
+    authenticator_data: &'a str,
+    signature: &'a str,
+}
+
+pub async fn passkey_login_finish(
+    challenge: &str,
+    credential_id: &str,
+    client_data_json: &str,
+    authenticator_data: &str,
+    signature: &str,
+) -> ApiResult<()> {
+    let _: serde_json::Value = post(
+        "/auth/passkey/login/finish",
+        &PasskeyLoginFinishBody {
+            challenge,
+            credential_id,
+            client_data_json,
+            authenticator_data,
+            signature,
+        },
+        200,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasskeyInfo {
+    #[allow(dead_code)]
+    pub credential_id: String,
+    pub label: Option<String>,
+    #[allow(dead_code)]
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PasskeyListResponse {
+    passkeys: Vec<PasskeyInfo>,
+}
+
+pub async fn list_passkeys() -> ApiResult<Vec<PasskeyInfo>> {
+    let resp: PasskeyListResponse = get("/auth/passkey/list").await?;
+    Ok(resp.passkeys)
+}
+
+/// Like `post_empty`, but returns the parsed body -- the two `.../begin`
+/// endpoints take no request body but do answer with one (the challenge).
+async fn post_empty_want<T: for<'a> Deserialize<'a>>(path: &str, want: u16) -> ApiResult<T> {
+    let resp = Request::post(path)
+        .header("content-type", "application/json")
+        .body("{}")
+        .map_err(|e| ApiError(format!("{path}: {e}")))?
+        .send()
+        .await
+        .map_err(|e| ApiError(format!("{path}: {e}")))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if status != want {
+        return Err(ApiError(format!("{path}: {status} {text}")));
+    }
+    serde_json::from_str(&text).map_err(|e| ApiError(format!("{path}: bad json: {e}")))
+}
