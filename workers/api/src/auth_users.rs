@@ -152,8 +152,12 @@ async fn create_session(env: &Env, user_id: &str) -> Result<String> {
     .bind(&[
         hash.into(),
         user_id.into(),
-        now.into(),
-        (now + SESSION_TTL_SECONDS).into(),
+        // D1's bind rejects a JS BigInt outright, and `worker`'s
+        // `From<i64> for JsValue` produces one -- cast through f64
+        // (lossless well under 2^53 for a unix-seconds timestamp),
+        // same fix already applied in h_approve_knock.
+        (now as f64).into(),
+        ((now + SESSION_TTL_SECONDS) as f64).into(),
     ])?
     .run()
     .await?;
@@ -260,8 +264,8 @@ pub async fn handle_register(mut req: Request, env: &Env) -> Result<Response> {
     .bind(&[
         hash.into(),
         email.clone().into(),
-        now.into(),
-        (now + VERIFICATION_TTL_SECONDS).into(),
+        (now as f64).into(),
+        ((now + VERIFICATION_TTL_SECONDS) as f64).into(),
     ])?
     .run()
     .await?;
@@ -337,7 +341,7 @@ pub async fn handle_verify(req: Request, env: &Env) -> Result<Response> {
         pending.email.clone().into(),
         password_hash.into(),
         salt.into(),
-        now.into(),
+        (now as f64).into(),
     ])?
     .run()
     .await?;

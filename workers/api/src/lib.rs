@@ -774,89 +774,34 @@ impl CuratomKernel {
             }
         };
 
-        // hostos_mcp is its own grant kind, not a resource read: approval
-        // mints a time-boxed row in the capabilities D1 table (mcp_gateway.rs)
-        // keyed on the same key the AI already holds, rather than an
-        // orchestrator job. Handled and returned here, before any of the
-        // Valhalla/attestation/orchestrator machinery below, none of which
-        // applies to MCP access.
+        // hostos_mcp used to be its own grant kind here: approving a knock
+        // for it minted a time-boxed row directly in the capabilities D1
+        // table (mcp_gateway.rs), keyed on the AI's own token. Retired,
+        // deliberately, not merely disabled -- every registered account now
+        // owns its own CuratomKernel instance (see `bootstrap_owner_id`),
+        // so `self.owner(hr)` above no longer distinguishes the founder
+        // from anyone who signed up; leaving this branch in place, gated
+        // or not, keeps a single hard-coded shortcut into one specific
+        // Worker (GITHUB_APP_PRIVATE_KEY, CLOUDFLARE_API_TOKEN, R2 keys,
+        // exec) alive in a codebase that is about to have a real, general
+        // "connect your own MCP server" feature in the dashboard -- for
+        // every account, hostos-mcp included as just one more entry a
+        // person adds, not a resource wired into the knock/approval path
+        // by name. Approving a knock that names it now refuses outright
+        // rather than silently falling through to the Valhalla logic
+        // below, which does not know what a "hostos_mcp" resource is
+        // either. No capability row is minted through this path anymore,
+        // for anyone, until the dashboard feature replaces it for real.
         if knock
             .resources
             .iter()
             .any(|r| r == curatom_resource_registry::HOSTOS_MCP)
         {
-            // hostos-mcp is the founder's own Worker -- GITHUB_APP_PRIVATE_KEY,
-            // CLOUDFLARE_API_TOKEN, R2 keys, exec. `self.owner(hr)` above only
-            // proves this caller owns *some* Curatom account; since every
-            // registered account now owns its own CuratomKernel instance (see
-            // `bootstrap_owner_id`), that check alone would let anyone who
-            // signs up approve their own hostos_mcp knock and mint themselves
-            // a real capability row in the one, Worker-wide `capabilities`
-            // table `mcp_gateway.rs` trusts for every caller. This resource is
-            // gated further, on purpose: only the founder's own instance --
-            // the one still named by the literal `CURATOM_OWNER_ID` value, not
-            // a per-user bootstrapped id -- may ever mint one. A regular
-            // account's own knock for this resource is refused here, not
-            // silently downgraded to a smaller grant.
-            let founder_owner_id = self
-                .env
-                .var("CURATOM_OWNER_ID")
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            if self.owner_id.borrow().clone() != founder_owner_id {
-                return (
-                    403,
-                    json!({
-                        "error": "hostos_mcp_founder_only",
-                        "detail": "hostos-mcp access is not available to Curatom accounts.",
-                    }),
-                );
-            }
-            let db = match self.env.d1("CURATOM_LEDGER") {
-                Ok(d) => d,
-                Err(e) => return (500, json!({ "error": format!("d1: {e}") })),
-            };
-            let now = CloudflareClock.now_unix();
-            let ttl_seconds = match &knock.duration {
-                CuratomDuration::SingleUse => 300i64,
-                CuratomDuration::Ttl { seconds } => *seconds as i64,
-            };
-            let expires_at = now + ttl_seconds;
-            let key_hash = curatom_crypto::sha256_hex(knock.token.as_bytes());
-            let stmt = db.prepare(
-                "INSERT INTO capabilities (key_hash, scope, expires_at, revoked, label, knock_id, created_at) \
-                 VALUES (?1, 'oauth', ?2, 0, ?3, ?4, ?5) \
-                 ON CONFLICT(key_hash) DO UPDATE SET \
-                   scope = excluded.scope, expires_at = excluded.expires_at, \
-                   revoked = 0, knock_id = excluded.knock_id",
-            );
-            // D1's bind rejects a JS BigInt outright -- `worker`'s
-            // `From<i64> for JsValue` produces one, since i64 doesn't fit an
-            // f64 losslessly in general. A unix-seconds timestamp does (well
-            // under 2^53), so cast through f64 rather than i64 -> JsValue
-            // directly. Verified live: the raw i64 bind failed with
-            // "D1_TYPE_ERROR: Type 'bigint' not supported" on the very first
-            // real approval this was exercised against.
-            let bound = match stmt.bind(&[
-                key_hash.clone().into(),
-                (expires_at as f64).into(),
-                knock.name.clone().into(),
-                knock.id.clone().into(),
-                (now as f64).into(),
-            ]) {
-                Ok(b) => b,
-                Err(e) => return (500, json!({ "error": format!("bind: {e}") })),
-            };
-            if let Err(e) = bound.run().await {
-                return (500, json!({ "error": format!("capability insert: {e}") }));
-            }
             return (
-                200,
+                410,
                 json!({
-                    "ok": true,
-                    "hostos_mcp_capability": true,
-                    "scope": "oauth",
-                    "expires_at": expires_at,
+                    "error": "hostos_mcp_knock_retired",
+                    "detail": "Approving a knock no longer grants MCP access. Connect an MCP server from the dashboard instead.",
                 }),
             );
         }
