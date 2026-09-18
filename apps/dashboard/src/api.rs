@@ -123,6 +123,7 @@ pub async fn refuse_knock(id: &str) -> ApiResult<()> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActivityEvent {
     pub kind: String,
+    pub summary: String,
     pub at: String,
 }
 

@@ -239,11 +239,21 @@ pub struct ApprovalView {
     pub duration: String,
 }
 
-/// Organic activity line.
+/// Organic activity line. Missing `at` for the whole life of this
+/// struct until 2026-09-18 -- the dashboard's own `ActivityEvent`
+/// required a non-optional `at` field that the server never sent, so
+/// every deserialize of `GET /organic/activity` failed, and the
+/// dashboard's `if let Ok(list) = ...` swallowed that error silently,
+/// showing "Nothing yet." regardless of how much activity actually
+/// existed. The Activity tile had never once displayed anything, for
+/// any account, since it was built. Confirmed live: registered a real
+/// account, read the raw `/organic/activity` response, and it was
+/// exactly `{"kind":...,"summary":...}` with no `at` at all.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActivityView {
     pub kind: String,
     pub summary: String,
+    pub at: String,
 }
 
 pub fn assert_organic_safe(value: &serde_json::Value) -> Result<(), String> {
