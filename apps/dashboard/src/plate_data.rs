@@ -9,9 +9,12 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use wasm_bindgen::JsCast;
+use web_sys::HtmlInputElement;
 
 use crate::api;
 use crate::kit::Sheet;
+use crate::zip_upload;
 
 #[component]
 pub fn DataPlate() -> impl IntoView {
@@ -20,6 +23,7 @@ pub fn DataPlate() -> impl IntoView {
     let busy = RwSignal::new(false);
     let syncing = RwSignal::new(None::<String>);
     let adding = RwSignal::new(false);
+    let uploading_to = RwSignal::new(None::<String>);
 
     let refresh = move || {
         spawn_local(async move {
@@ -78,6 +82,7 @@ pub fn DataPlate() -> impl IntoView {
                         let id_for_sync = r.id.clone();
                         let id_for_delete = r.id.clone();
                         let id_for_busy = r.id.clone();
+                        let id_for_upload = r.id.clone();
                         view! {
                             <div class="card">
                                 <div style="display:flex;justify-content:space-between;align-items:center">
@@ -103,6 +108,13 @@ pub fn DataPlate() -> impl IntoView {
                                     </button>
                                     <button
                                         class="btn-ghost"
+                                        disabled=move || busy.get() || syncing.get().is_some()
+                                        on:click=move |_| uploading_to.set(Some(id_for_upload.clone()))
+                                    >
+                                        "UPLOAD ZIP"
+                                    </button>
+                                    <button
+                                        class="btn-ghost"
                                         disabled=move || busy.get()
                                         on:click=move |_| delete(id_for_delete.clone())
                                     >
@@ -119,6 +131,13 @@ pub fn DataPlate() -> impl IntoView {
                 <AddRepositoryModal
                     on_close=Callback::new(move |_| adding.set(false))
                     on_added=Callback::new(move |_| { adding.set(false); refresh(); })
+                />
+            })}
+            {move || uploading_to.get().map(|id| view! {
+                <UploadZipModal
+                    repository_id=id
+                    on_close=Callback::new(move |_| uploading_to.set(None))
+                    on_uploaded=Callback::new(move |_| { uploading_to.set(None); refresh(); })
                 />
             })}
         </div>
@@ -184,6 +203,90 @@ fn AddRepositoryModal(on_close: Callback<()>, on_added: Callback<()>) -> impl In
                 </button>
                 <button class="btn" disabled=move || busy.get() on:click=submit>
                     {move || if busy.get() { "…" } else { "ADD" }}
+                </button>
+            </div>
+        </Sheet>
+    }
+}
+
+#[component]
+fn UploadZipModal(
+    repository_id: String,
+    on_close: Callback<()>,
+    on_uploaded: Callback<()>,
+) -> impl IntoView {
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let picked_name = RwSignal::new(None::<String>);
+
+    let on_change = move |ev: leptos::ev::Event| {
+        let Some(input) = ev.target().and_then(|t| t.dyn_into::<HtmlInputElement>().ok()) else {
+            return;
+        };
+        let Some(files) = input.files() else { return };
+        let Some(file) = files.get(0) else { return };
+        picked_name.set(Some(file.name()));
+        error.set(None);
+        busy.set(true);
+        let repo_id = repository_id.clone();
+        spawn_local(async move {
+            let gloo = gloo_file::File::from(file);
+            let bytes = match gloo_file::futures::read_as_bytes(&gloo).await {
+                Ok(b) => b,
+                Err(e) => {
+                    error.set(Some(format!("could not read file: {e}")));
+                    busy.set(false);
+                    return;
+                }
+            };
+            let extracted = match zip_upload::extract(&bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    error.set(Some(e));
+                    busy.set(false);
+                    return;
+                }
+            };
+            let files: Vec<api::UploadFile> = extracted
+                .iter()
+                .map(|f| api::UploadFile { path: &f.path, content: &f.content })
+                .collect();
+            match api::upload_repository(&repo_id, &files).await {
+                Ok(_) => {
+                    busy.set(false);
+                    on_uploaded.run(());
+                }
+                Err(e) => {
+                    error.set(Some(e.to_string()));
+                    busy.set(false);
+                }
+            }
+        });
+    };
+
+    view! {
+        <Sheet on_close=on_close>
+            <h3 style="margin:0 0 8px">"Upload zip"</h3>
+            <p class="dim" style="font-size:13px;margin-bottom:12px">
+                "Extracted in your own browser -- only the decoded file text is sent, "
+                "never the zip itself. Binary files are skipped. Re-uploading replaces "
+                "what's stored for this repository, same as SYNC does."
+            </p>
+            <input
+                class="input"
+                type="file"
+                accept=".zip"
+                disabled=move || busy.get()
+                on:change=on_change
+            />
+            {move || picked_name.get().map(|n| view! {
+                <p class="dim" style="font-size:12px;margin:8px 0 0">{n}</p>
+            })}
+            {move || error.get().map(|e| view! { <p class="err">{e}</p> })}
+            {move || busy.get().then(|| view! { <p class="dim" style="font-size:12px">"Extracting and uploading…"</p> })}
+            <div class="row" style="margin-top:12px">
+                <button class="btn-ghost" disabled=move || busy.get() on:click=move |_| on_close.run(())>
+                    "CANCEL"
                 </button>
             </div>
         </Sheet>

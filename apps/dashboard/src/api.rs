@@ -587,3 +587,23 @@ pub async fn delete_repository(id: &str) -> ApiResult<()> {
 pub async fn sync_repository(id: &str) -> ApiResult<RepositoryInfo> {
     post_empty_want(&format!("/organic/repositories/{}/sync", js_sys::encode_uri_component(id)), 200).await
 }
+
+#[derive(Serialize)]
+pub struct UploadFile<'a> {
+    pub path: &'a str,
+    pub content: &'a str,
+}
+
+#[derive(Serialize)]
+struct UploadRepositoryBody<'a> {
+    files: &'a [UploadFile<'a>],
+}
+
+pub async fn upload_repository(id: &str, files: &[UploadFile<'_>]) -> ApiResult<RepositoryInfo> {
+    post(
+        &format!("/organic/repositories/{}/upload", js_sys::encode_uri_component(id)),
+        &UploadRepositoryBody { files },
+        200,
+    )
+    .await
+}

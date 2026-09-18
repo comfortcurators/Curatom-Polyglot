@@ -18,6 +18,7 @@ mod plates;
 mod reset_password;
 mod turnstile;
 mod view_transition;
+mod zip_upload;
 
 use app::App;
 
