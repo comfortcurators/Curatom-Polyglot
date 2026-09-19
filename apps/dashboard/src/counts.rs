@@ -27,6 +27,7 @@ impl Counts {
             PlateId::Account => None,
             PlateId::Compute => None,
             PlateId::Data => None,
+            PlateId::Whitepaper => None,
         }
     }
 }

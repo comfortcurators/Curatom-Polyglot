@@ -667,3 +667,42 @@ pub async fn create_checkpoint(token: &str, note: &str) -> ApiResult<Checkpoint>
     )
     .await
 }
+
+// ---- whitepaper ----
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WhitepaperResponse {
+    /// `None` when no whitepaper is set (or when the saved text was
+    /// blanked, which the kernel stores as `None` rather than an empty
+    /// string -- see `Kernel::set_whitepaper`).
+    pub whitepaper: Option<String>,
+}
+
+pub async fn get_whitepaper() -> ApiResult<WhitepaperResponse> {
+    get("/organic/whitepaper").await
+}
+
+#[derive(Serialize)]
+struct SetWhitepaperBody<'a> {
+    text: &'a str,
+}
+
+pub async fn set_whitepaper(text: &str) -> ApiResult<()> {
+    // The kernel handler is PUT (`h_set_whitepaper`), and this module's
+    // `post` helper is POST-only. Only this one call in the whole
+    // dashboard needs PUT, so rather than grow the shared helper with a
+    // method parameter, it is written out directly against gloo-net.
+    let resp = Request::put("/organic/whitepaper")
+        .header("content-type", "application/json")
+        .json(&SetWhitepaperBody { text })
+        .map_err(|e| ApiError(format!("/organic/whitepaper: {e}")))?
+        .send()
+        .await
+        .map_err(|e| ApiError(format!("/organic/whitepaper: {e}")))?;
+    let status = resp.status();
+    if status != 200 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ApiError(format!("/organic/whitepaper: {status} {body}")));
+    }
+    Ok(())
+}

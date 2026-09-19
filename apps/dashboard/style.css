@@ -130,6 +130,34 @@ input {
   font-size: 14px;
 }
 
+/* The whitepaper is prose, not code: proportional font, generous line
+   height, and a monospace-free body so it reads as writing rather than
+   as data entry. `resize: vertical` only -- horizontal resize on a
+   full-width element is user-hostile, and none is the reason anyone
+   would want to drag it. */
+.whitepaper-editor {
+  width: 100%;
+  min-height: 320px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+
+.whitepaper-editor:focus {
+  border-color: #444;
+}
+
+.whitepaper-editor::placeholder {
+  color: var(--ink-faint);
+}
+
 .turnstile-wrap {
   min-height: 90px;
   border-radius: 10px;
@@ -239,6 +267,9 @@ input {
 }
 .vt-plate-data {
   view-transition-name: plate-data;
+}
+.vt-plate-whitepaper {
+  view-transition-name: plate-whitepaper;
 }
 
 /* --- plate panel (fullscreen) --- */

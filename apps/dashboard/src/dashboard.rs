@@ -15,6 +15,7 @@ use crate::plate_billboard::BillboardPlate;
 use crate::plate_keys::KeysPlate;
 use crate::plate_knocks::KnocksPlate;
 use crate::plate_valhalla::ValhallaPlate;
+use crate::plate_whitepaper::WhitepaperPlate;
 use crate::plates::PlateId;
 use crate::view_transition::with_view_transition;
 
@@ -192,6 +193,7 @@ fn PlateFullscreen(plate: PlateId, on_close: Callback<()>) -> impl IntoView {
                 PlateId::Account => view! { <AccountPlate /> }.into_any(),
                 PlateId::Compute => view! { <ComputePlate /> }.into_any(),
                 PlateId::Data => view! { <DataPlate /> }.into_any(),
+                PlateId::Whitepaper => view! { <WhitepaperPlate /> }.into_any(),
             }}
         </div>
     }

@@ -14,6 +14,7 @@ mod plate_data;
 mod plate_keys;
 mod plate_knocks;
 mod plate_valhalla;
+mod plate_whitepaper;
 mod plates;
 mod reset_password;
 mod turnstile;
