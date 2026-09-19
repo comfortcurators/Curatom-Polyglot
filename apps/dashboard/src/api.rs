@@ -135,6 +135,13 @@ pub async fn activity() -> ApiResult<Vec<ActivityEvent>> {
 pub struct KeyInfo {
     pub token: String,
     pub label: String,
+    /// This key's own workspace identity (Part 2, `OrganicToken::workspace_id`).
+    /// Served by the kernel and returned by `h_list_keys`; `serde(default)`
+    /// so a dashboard build against a Worker predating that field still
+    /// deserializes (empty string, blank header line) rather than failing
+    /// the whole `list_keys` call over one missing field.
+    #[serde(default)]
+    pub workspace_id: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub activity_count: u64,
@@ -705,4 +712,61 @@ pub async fn set_whitepaper(text: &str) -> ApiResult<()> {
         return Err(ApiError(format!("/organic/whitepaper: {status} {body}")));
     }
     Ok(())
+}
+
+// ---- sketchpads ----
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScratchpadNote {
+    pub id: String,
+    pub kind: String,
+    pub body: String,
+    pub at: String,
+    pub knock_id: Option<String>,
+    pub round: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScratchpadNotes {
+    pub session_id: String,
+    pub round: i64,
+    pub opened_at: String,
+    pub notes: Vec<ScratchpadNote>,
+}
+
+/// Read a key's current session. The Worker route validates the token
+/// belongs to this account before forwarding to that key's own
+/// Scratchpad Durable Object; the dashboard passes the raw token as a
+/// query param, same as the machine-facing guide does.
+pub async fn list_scratchpad_notes(token: &str) -> ApiResult<ScratchpadNotes> {
+    get(&format!(
+        "/scratch/notes?token={}",
+        js_sys::encode_uri_component(token)
+    ))
+    .await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScratchpadSession {
+    pub session_id: String,
+    pub opened_at: String,
+    pub closed_at: Option<String>,
+    pub round_count: i64,
+    pub intent_count: i64,
+    pub pattern_count: i64,
+    pub receipt_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ScratchpadHistoryResponse {
+    sessions: Vec<ScratchpadSession>,
+}
+
+pub async fn list_scratchpad_history(token: &str) -> ApiResult<Vec<ScratchpadSession>> {
+    let resp: ScratchpadHistoryResponse = get(&format!(
+        "/scratch/history?token={}",
+        js_sys::encode_uri_component(token)
+    ))
+    .await?;
+    Ok(resp.sessions)
 }

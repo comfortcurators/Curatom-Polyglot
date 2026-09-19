@@ -13,6 +13,7 @@ mod plate_compute;
 mod plate_data;
 mod plate_keys;
 mod plate_knocks;
+mod plate_sketchpads;
 mod plate_valhalla;
 mod plate_whitepaper;
 mod plates;

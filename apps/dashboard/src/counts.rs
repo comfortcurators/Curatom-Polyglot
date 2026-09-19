@@ -28,6 +28,7 @@ impl Counts {
             PlateId::Compute => None,
             PlateId::Data => None,
             PlateId::Whitepaper => None,
+            PlateId::Sketchpads => None,
         }
     }
 }

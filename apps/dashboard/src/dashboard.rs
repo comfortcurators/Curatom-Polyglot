@@ -14,6 +14,7 @@ use crate::plate_data::DataPlate;
 use crate::plate_billboard::BillboardPlate;
 use crate::plate_keys::KeysPlate;
 use crate::plate_knocks::KnocksPlate;
+use crate::plate_sketchpads::SketchpadsPlate;
 use crate::plate_valhalla::ValhallaPlate;
 use crate::plate_whitepaper::WhitepaperPlate;
 use crate::plates::PlateId;
@@ -194,6 +195,7 @@ fn PlateFullscreen(plate: PlateId, on_close: Callback<()>) -> impl IntoView {
                 PlateId::Compute => view! { <ComputePlate /> }.into_any(),
                 PlateId::Data => view! { <DataPlate /> }.into_any(),
                 PlateId::Whitepaper => view! { <WhitepaperPlate /> }.into_any(),
+                PlateId::Sketchpads => view! { <SketchpadsPlate /> }.into_any(),
             }}
         </div>
     }

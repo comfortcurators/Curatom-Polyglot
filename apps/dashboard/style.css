@@ -158,6 +158,22 @@ input {
   color: var(--ink-faint);
 }
 
+/* Small uppercase badge for a sketchpad note's `kind` (intent,
+   pattern, note). Visually distinct from `.chip` -- a `.chip` is a
+   clickable control, a `.kind-badge` is read-only text. Using the same
+   class for both would make a machine's note look tappable. */
+.kind-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--line);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
 .turnstile-wrap {
   min-height: 90px;
   border-radius: 10px;
@@ -270,6 +286,9 @@ input {
 }
 .vt-plate-whitepaper {
   view-transition-name: plate-whitepaper;
+}
+.vt-plate-sketchpads {
+  view-transition-name: plate-sketchpads;
 }
 
 /* --- plate panel (fullscreen) --- */

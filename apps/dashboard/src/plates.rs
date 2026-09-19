@@ -9,10 +9,11 @@ pub enum PlateId {
     Compute,
     Data,
     Whitepaper,
+    Sketchpads,
 }
 
 impl PlateId {
-    pub const ALL: [PlateId; 9] = [
+    pub const ALL: [PlateId; 10] = [
         PlateId::Knocks,
         PlateId::Keys,
         PlateId::Valhalla,
@@ -22,6 +23,7 @@ impl PlateId {
         PlateId::Compute,
         PlateId::Data,
         PlateId::Whitepaper,
+        PlateId::Sketchpads,
     ];
 
     pub fn title(self) -> &'static str {
@@ -35,6 +37,7 @@ impl PlateId {
             PlateId::Compute => "Compute",
             PlateId::Data => "Data",
             PlateId::Whitepaper => "Whitepaper",
+            PlateId::Sketchpads => "Sketchpads",
         }
     }
 
@@ -49,6 +52,7 @@ impl PlateId {
             PlateId::Compute => "Your own connectors, your own auth",
             PlateId::Data => "Repository snapshots, synced by hand",
             PlateId::Whitepaper => "This account's own company context",
+            PlateId::Sketchpads => "What each key's machine has written",
         }
     }
 
@@ -66,6 +70,7 @@ impl PlateId {
             PlateId::Compute => "vt-plate-compute",
             PlateId::Data => "vt-plate-data",
             PlateId::Whitepaper => "vt-plate-whitepaper",
+            PlateId::Sketchpads => "vt-plate-sketchpads",
         }
     }
 }

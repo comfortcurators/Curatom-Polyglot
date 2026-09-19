@@ -792,6 +792,7 @@ impl CuratomKernel {
                 json!({
                     "token": t.token,
                     "label": t.label,
+                    "workspace_id": t.workspace_id,
                     "created_at": t.created_at,
                     "last_used_at": t.last_used_at,
                     "activity_count": log.len(),
