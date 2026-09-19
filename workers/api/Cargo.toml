@@ -17,6 +17,7 @@ js-sys = "0.3"
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
+rsa = { version = "0.9", features = ["sha2"] }
 hex = "0.4"
 urlencoding = "2"
 

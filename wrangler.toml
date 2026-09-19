@@ -75,3 +75,21 @@ VALHALLA_URL = "https://valhalla.rajvansh.dev"
 # Verified sender per ZeptoMail's own console: Domain/Sender Address =
 # rajvansh.dev, so this is the only address that will actually send.
 EMAIL_FROM = "noreply@rajvansh.dev"
+# Cloudflare Access (Contract 1's original gate), verified against
+# Cloudflare's own JWKS rather than trusted as a header value.
+#
+# Both are public. The team domain appears in every Access JWT anyway,
+# and the audience tag is an identifier, not a secret. Safe to commit.
+#
+# Leave either empty to make the verification path inert -- with both
+# unset, `access::verify_and_resolve` returns Ok(None) immediately and
+# the kernel authenticates only via session cookie, RAJ_TOKEN, or the
+# dev-only header, exactly as it does today. Nothing changes until both
+# values are pasted in.
+#
+# Where to find them:
+#   TEAM_DOMAIN: the URL Access redirects to, e.g. https://<team>.cloudflareaccess.com
+#   POLICY_AUD:  Access dashboard -> Applications -> this app -> Overview
+#                -> "Application Audience (AUD) Tag"
+TEAM_DOMAIN = ""
+POLICY_AUD = ""

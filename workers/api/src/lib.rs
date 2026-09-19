@@ -37,6 +37,7 @@ use curatom_ports::Clock;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+mod access;
 mod auth_users;
 mod mail;
 mod passkey;
@@ -547,11 +548,12 @@ impl CuratomKernel {
     /// never a downgrade. A verified account's own session authenticates
     /// it as the owner of its own (per-user) instance, exactly the way
     /// RAJ_TOKEN/Access already authenticate the founder as the owner of
-    /// the original singleton instance -- same check, two identity
-    /// sources, tried in this order because a session cookie is the more
-    /// specific credential when both happen to be present.
+    /// the original singleton instance -- same check, three identity
+    /// sources, tried in this order because a session cookie is the most
+    /// specific credential when more than one happens to be present.
     async fn owner(&self, hr: &HttpRequestDto) -> std::result::Result<(), Reply> {
         let owner_id = self.owner_id.borrow().clone();
+
         if let Ok(Some((user_id, _))) =
             auth_users::resolve_user_session_from_cookie(hr.header("cookie"), &self.env).await
         {
@@ -561,6 +563,32 @@ impl CuratomKernel {
                 Err((403, json!({ "error": "not_owner" })))
             };
         }
+
+        // Cloudflare Access JWT: Contract 1's original gate, now actually
+        // verified against Cloudflare's JWKS rather than trusted as a
+        // header value. Inert unless TEAM_DOMAIN and POLICY_AUD are both
+        // set in the Worker's environment -- with either unset,
+        // `verify_and_resolve` returns `Ok(None)` and this block does
+        // nothing, exactly as before this existed.
+        //
+        // A JWT that *is* present and fails verification is a rejected
+        // credential, not a downgrade to "no identity" -- so this fails
+        // closed with 401 rather than falling through to RAJ_TOKEN, which
+        // would let a forged header silently fall back to a weaker path.
+        if let Some(jwt) = hr.header("cf-access-jwt-assertion") {
+            match crate::access::verify_and_resolve(&self.env, jwt).await {
+                Ok(Some(user_id)) if user_id == owner_id => return Ok(()),
+                Ok(Some(_)) => return Err((403, json!({ "error": "not_owner" }))),
+                Ok(None) => {} // TEAM_DOMAIN/POLICY_AUD unset; fall through
+                Err(e) => {
+                    return Err((
+                        401,
+                        json!({ "error": "access_jwt_invalid", "detail": e }),
+                    ));
+                }
+            }
+        }
+
         let idp = self
             .organic_idp
             .as_ref()
