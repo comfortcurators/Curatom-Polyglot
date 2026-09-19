@@ -74,6 +74,31 @@ struct WhitepaperBlob {
     text: Option<String>,
 }
 
+/// `storage.put` wrapped to name the key on the specific failure mode
+/// that took production down on 19 Sep 2026: a value that serializes to
+/// JS `undefined` rather than `null`. `worker::durable::Storage::put`
+/// calls `serde_wasm_bindgen::to_value` internally and hands the result
+/// straight to the underlying JS `put`; a top-level `Option::None`
+/// (or anything else that happens to serialize the same way) throws
+/// `TypeError: put() called with undefined value` -- an error that
+/// names neither the key nor the caller. Checking here first turns
+/// that into `"refusing to write undefined to <key>"`, so the next
+/// occurrence of this bug class is diagnosable from the error message
+/// alone rather than from a `wrangler tail` session against production.
+/// `WhitepaperBlob` already makes this specific case impossible; this
+/// is the backstop for whichever field is next.
+async fn guarded_put<T: Serialize>(
+    storage: &worker::durable::Storage,
+    key: &str,
+    value: &T,
+) -> Result<(), String> {
+    let js = serde_wasm_bindgen::to_value(value).map_err(|e| e.to_string())?;
+    if js.is_undefined() {
+        return Err(format!("refusing to write undefined to {key}"));
+    }
+    storage.put(key, value).await.map_err(|e| e.to_string())
+}
+
 pub struct DOStateStore {
     storage: Mutex<worker::durable::Storage>,
 }
@@ -209,8 +234,26 @@ impl StateStore for DOStateStore {
             {
                 state.checkpoints = v;
             }
-            if let Ok(Some(w)) = storage.get::<WhitepaperBlob>(KEY_WHITEPAPER).await {
-                state.whitepaper = w.text;
+            // Try the current shape first. Fall back to a bare `String`
+            // for a DO that migrated under the pre-fix build of 5b,
+            // where `put(KEY_WHITEPAPER, &legacy.whitepaper)` wrote a
+            // bare string directly (only reachable if that DO's
+            // whitepaper was `Some` at the time -- `None` is exactly
+            // what crashed the write before it landed). Silently
+            // reading such a value as `WhitepaperBlob` fails to
+            // deserialize, `if let Ok(Some(..))` swallows the error, and
+            // the whitepaper reads back as `None` -- data loss with no
+            // error surfaced anywhere. The fallback exists so that
+            // silent case cannot happen, whether or not any DO actually
+            // hit it.
+            match storage.get::<WhitepaperBlob>(KEY_WHITEPAPER).await {
+                Ok(Some(w)) => state.whitepaper = w.text,
+                Ok(None) => {}
+                Err(_) => {
+                    if let Ok(Some(s)) = storage.get::<String>(KEY_WHITEPAPER).await {
+                        state.whitepaper = Some(s);
+                    }
+                }
             }
 
             // Best-effort cleanup of an orphaned legacy blob: the crash
@@ -233,71 +276,31 @@ impl StateStore for DOStateStore {
         //    orphaned kernel_state, which the branch above already cleans
         //    up on the next load.
         if let Ok(Some(legacy)) = storage.get::<KernelState>(KEY_LEGACY).await {
-            storage
-                .put(KEY_TOKENS, &legacy.tokens)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_KNOCKS, &legacy.knocks)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_INTENTS, &legacy.intents)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_APPROVALS, &legacy.approvals)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_GRANTS, &legacy.grants)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_CONSUMED, &legacy.consumed)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_ISSUED, &legacy.issued)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_OUTCOMES, &legacy.outcomes)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_ACTIVITY, &legacy.activity)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_FREEZES, &legacy.freezes)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_CONNECTORS, &legacy.connectors)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_REPOSITORIES, &legacy.repositories)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_CHECKPOINTS, &legacy.checkpoints)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage
-                .put(KEY_WHITEPAPER, &WhitepaperBlob { text: legacy.whitepaper.clone() })
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_TOKENS, &legacy.tokens).await?;
+            guarded_put(&storage, KEY_KNOCKS, &legacy.knocks).await?;
+            guarded_put(&storage, KEY_INTENTS, &legacy.intents).await?;
+            guarded_put(&storage, KEY_APPROVALS, &legacy.approvals).await?;
+            guarded_put(&storage, KEY_GRANTS, &legacy.grants).await?;
+            guarded_put(&storage, KEY_CONSUMED, &legacy.consumed).await?;
+            guarded_put(&storage, KEY_ISSUED, &legacy.issued).await?;
+            guarded_put(&storage, KEY_OUTCOMES, &legacy.outcomes).await?;
+            guarded_put(&storage, KEY_ACTIVITY, &legacy.activity).await?;
+            guarded_put(&storage, KEY_FREEZES, &legacy.freezes).await?;
+            guarded_put(&storage, KEY_CONNECTORS, &legacy.connectors).await?;
+            guarded_put(&storage, KEY_REPOSITORIES, &legacy.repositories).await?;
+            guarded_put(&storage, KEY_CHECKPOINTS, &legacy.checkpoints).await?;
+            guarded_put(
+                &storage,
+                KEY_WHITEPAPER,
+                &WhitepaperBlob { text: legacy.whitepaper.clone() },
+            )
+            .await?;
 
             let meta = MetaBlob {
                 owner_id: legacy.owner_id.clone(),
                 owner: legacy.owner.clone(),
             };
-            storage
-                .put(KEY_META, &meta)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_META, &meta).await?;
 
             let _ = storage.delete(KEY_LEGACY).await;
             return Ok(Some(legacy));
@@ -310,10 +313,7 @@ impl StateStore for DOStateStore {
         //    "fresh" for the kernel's purposes, because `load()` in the
         //    kernel already does `if state.owner_id.is_empty() { ... }`.
         let placeholder = MetaBlob::default();
-        storage
-            .put(KEY_META, &placeholder)
-            .await
-            .map_err(|e| e.to_string())?;
+        guarded_put(&storage, KEY_META, &placeholder).await?;
         Ok(None)
     }
 
@@ -324,88 +324,51 @@ impl StateStore for DOStateStore {
         // A mutation that touched one entity kind writes one key. This is
         // the whole point of the split.
         if dirty.contains(DirtyKinds::TOKENS) {
-            storage
-                .put(KEY_TOKENS, &state.tokens)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_TOKENS, &state.tokens).await?;
         }
         if dirty.contains(DirtyKinds::KNOCKS) {
-            storage
-                .put(KEY_KNOCKS, &state.knocks)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_KNOCKS, &state.knocks).await?;
         }
         if dirty.contains(DirtyKinds::INTENTS) {
-            storage
-                .put(KEY_INTENTS, &state.intents)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_INTENTS, &state.intents).await?;
         }
         if dirty.contains(DirtyKinds::APPROVALS) {
-            storage
-                .put(KEY_APPROVALS, &state.approvals)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_APPROVALS, &state.approvals).await?;
         }
         if dirty.contains(DirtyKinds::GRANTS) {
-            storage
-                .put(KEY_GRANTS, &state.grants)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_GRANTS, &state.grants).await?;
         }
         if dirty.contains(DirtyKinds::CONSUMED) {
-            storage
-                .put(KEY_CONSUMED, &state.consumed)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_CONSUMED, &state.consumed).await?;
         }
         if dirty.contains(DirtyKinds::ISSUED) {
-            storage
-                .put(KEY_ISSUED, &state.issued)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_ISSUED, &state.issued).await?;
         }
         if dirty.contains(DirtyKinds::OUTCOMES) {
-            storage
-                .put(KEY_OUTCOMES, &state.outcomes)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_OUTCOMES, &state.outcomes).await?;
         }
         if dirty.contains(DirtyKinds::ACTIVITY) {
-            storage
-                .put(KEY_ACTIVITY, &state.activity)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_ACTIVITY, &state.activity).await?;
         }
         if dirty.contains(DirtyKinds::FREEZES) {
-            storage
-                .put(KEY_FREEZES, &state.freezes)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_FREEZES, &state.freezes).await?;
         }
         if dirty.contains(DirtyKinds::CONNECTORS) {
-            storage
-                .put(KEY_CONNECTORS, &state.connectors)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_CONNECTORS, &state.connectors).await?;
         }
         if dirty.contains(DirtyKinds::REPOSITORIES) {
-            storage
-                .put(KEY_REPOSITORIES, &state.repositories)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_REPOSITORIES, &state.repositories).await?;
         }
         if dirty.contains(DirtyKinds::CHECKPOINTS) {
-            storage
-                .put(KEY_CHECKPOINTS, &state.checkpoints)
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(&storage, KEY_CHECKPOINTS, &state.checkpoints).await?;
         }
         if dirty.contains(DirtyKinds::WHITEPAPER) {
-            storage
-                .put(KEY_WHITEPAPER, &WhitepaperBlob { text: state.whitepaper.clone() })
-                .await
-                .map_err(|e| e.to_string())?;
+            guarded_put(
+                &storage,
+                KEY_WHITEPAPER,
+                &WhitepaperBlob { text: state.whitepaper.clone() },
+            )
+            .await?;
         }
 
         // Meta unconditionally, per the struct doc above. Two short
@@ -416,10 +379,7 @@ impl StateStore for DOStateStore {
             owner_id: state.owner_id.clone(),
             owner: state.owner.clone(),
         };
-        storage
-            .put(KEY_META, &meta)
-            .await
-            .map_err(|e| e.to_string())?;
+        guarded_put(&storage, KEY_META, &meta).await?;
 
         Ok(())
     }

@@ -246,6 +246,7 @@ dependencies = [
  "curatom-protocol",
  "js-sys",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "wasm-bindgen",
  "worker",
