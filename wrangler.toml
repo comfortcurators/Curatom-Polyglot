@@ -16,6 +16,16 @@ workers_dev = true
 [build]
 command = "cd apps/dashboard && trunk build --release && cd ../../workers/api && worker-build --release"
 
+# Added 19 Sep 2026, after the 5b incident. Every diagnosis in that
+# incident was tail-or-nothing: wrangler tail only shows what streams
+# past while a session is open, and this Worker had no retained event
+# log, so nothing about the deploy window before the tail was opened
+# could be queried after the fact. This does not fix or prevent
+# anything -- it means the next incident leaves a log instead of a
+# five-second window that has to be watched live to exist at all.
+[observability]
+enabled = true
+
 [[durable_objects.bindings]]
 name = "CURATOM_KERNEL"
 class_name = "CuratomKernel"

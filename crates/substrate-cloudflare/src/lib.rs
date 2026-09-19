@@ -1,4 +1,13 @@
 //! Cloudflare substrate. wasm only. Not a workspace member.
+//!
+//! Never call `storage.put` directly in this file. Use `guarded_put`.
+//! See 19 Sep 2026: a bare top-level `Option::None` serializes to JS
+//! `undefined`, and Cloudflare's real Durable Object storage throws on
+//! that with an error naming neither the key nor the caller.
+//! `guarded_put` is the only thing standing between the next such value
+//! and a repeat of that incident -- it does not prevent the bug, it
+//! names the key when it happens. If you are adding a new storage key,
+//! route it through `guarded_put`, not `storage.put`.
 
 use async_trait::async_trait;
 use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
