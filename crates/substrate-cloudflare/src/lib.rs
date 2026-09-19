@@ -101,6 +101,37 @@ impl DOStateStore {
 /// keys and then be indistinguishable from a fresh DO on the next
 /// load, losing them silently. Writing meta every time is the honest
 /// fix for that hole.
+///
+/// # Rollback note for this migration
+///
+/// The migration is one-way: it deletes the legacy `kernel_state` blob
+/// after writing every entity key and `kernel:meta`. `git revert` of this
+/// commit therefore is NOT a rollback in production. The reverted 5a code
+/// reads only `kernel_state`; a migrated DO has no such key, so `load()`
+/// returns `None`, the kernel falls back to `KernelState::default()`, and
+/// every token, knock, connector, repository, checkpoint, and activity
+/// entry the owner had is gone from the kernel's perspective -- while
+/// still physically present under `kernel:*` keys that 5a code never
+/// looks at.
+///
+/// If this turns out to be wrong after real migrations have run, the
+/// correct response is a forward-fix commit that reads and repairs the
+/// `kernel:*` keys, not a revert. A true code-level rollback would
+/// require keeping this `load()` path specifically (which understands
+/// both formats) while reverting only the `persist()` side -- more
+/// surgical than a `git revert`, and worth doing deliberately rather
+/// than in an incident.
+///
+/// Verified by a local `wrangler dev` run (Miniflare's SQLite-backed DO
+/// storage, not production): the migration path, idempotency, and
+/// dirty-set write isolation across all fourteen entity kinds all held,
+/// byte-for-byte against a legacy-format blob seeded through the real
+/// HTTP API. Not verified: that production Durable Object storage
+/// behaves identically to Miniflare's on the exact `get`/`put`/`delete`
+/// calls this migration makes. Both go through the same `worker-rs`
+/// signatures and the same serde-json serialization, so this is very
+/// likely true -- but it was not checked against a real production DO,
+/// only inferred from the shared implementation surface.
 #[async_trait(?Send)]
 impl StateStore for DOStateStore {
     async fn load(&self) -> Result<Option<KernelState>, String> {
