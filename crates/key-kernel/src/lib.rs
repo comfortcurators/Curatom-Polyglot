@@ -5,6 +5,48 @@ use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
 use curatom_protocol::*;
 use curatom_resource_registry::known_resource;
 
+/// Storage-budget caps for the two unbounded `Vec`s in `KernelState`.
+///
+/// DO storage values are limited to 128 KiB. Every entry in `activity`
+/// is roughly 150-250 bytes of JSON; every entry in `outcomes` is
+/// larger and variable because `Outcome::data` carries an arbitrary
+/// `serde_json::Value`. Left unbounded, `activity` grows past the limit
+/// at roughly 500-800 entries and `outcomes` at some smaller number
+/// depending on what the data payloads look like. The failure mode is
+/// the DO's `put` returning an error, which `persist` surfaces as a
+/// `String` and the caller sees as a 500 -- delayed and attributed to
+/// whatever unrelated mutation happens to hit the limit first.
+///
+/// These are rolling windows, not the audit log. The design's "all
+/// intents, patterns, kept" promise is fulfilled by D1 (see
+/// `workers/api/src/scratchpad.rs`'s `mirror_note`), not by the in-DO
+/// `activity` Vec. The Vec exists so the dashboard feed can be served
+/// from DO state without a D1 round-trip per poll; a rolling window is
+/// what a feed is.
+///
+/// Budget math, worst case:
+///   256 activity entries * ~250 B = ~64 KiB
+///    32 outcome entries  * ~1.3 KB = ~42 KiB
+/// plus the small entity collections (tokens, knocks, connectors,
+/// repositories, meta) which grow only on explicit user action, not
+/// from automated traffic. Comfortably under 128 KiB for a typical
+/// owner. A pathological owner with thousands of checkpoints across
+/// many tokens can still exceed it -- see the note at
+/// `create_checkpoint` for why that is a separate concern.
+const MAX_ACTIVITY_ENTRIES: usize = 256;
+const MAX_OUTCOME_ENTRIES: usize = 32;
+
+/// Outcome data payloads larger than this are replaced with a
+/// truncation marker (`{"truncated": true, "original_bytes": N,
+/// "preview": "..."}`) before being stored. 1 KiB is generous for the
+/// structured responses this system's connectors produce
+/// (`{"workers":1,"buckets":1}` and the like) and small enough that 32
+/// of them fit in a DO storage value with headroom for everything
+/// else. A whitepaper read, whose `data` is the full whitepaper text,
+/// is the case this exists for: without it, a single such outcome
+/// could exceed the per-value limit on its own.
+const MAX_OUTCOME_DATA_BYTES: usize = 1_024;
+
 pub struct Kernel<S, L, A, C>
 where
     S: StateStore,
@@ -106,6 +148,13 @@ where
                 intent_id,
                 approval_id,
             });
+            // Rolling window -- drop the oldest when over the cap. A
+            // single `drain(0..n)` rather than repeated `remove(0)`
+            // because drain is O(n) in the number dropped, not O(n^2).
+            if st.activity.len() > MAX_ACTIVITY_ENTRIES {
+                let drop = st.activity.len() - MAX_ACTIVITY_ENTRIES;
+                st.activity.drain(0..drop);
+            }
         }
         // `note` pushes into `activity` on every call, so it owns the
         // ACTIVITY bit itself -- callers that mark ACTIVITY too are
@@ -399,6 +448,7 @@ where
     }
 
     pub async fn record_outcome(&mut self, o: Outcome) -> Result<(), String> {
+        let o = cap_outcome_data(o);
         let summary = if o.ok {
             match o.resource.as_str() {
                 "hostos.inventory" => "[MOCK] HostOS is healthy. I found 7 services.".into(),
@@ -413,6 +463,11 @@ where
         {
             let st = self.st_mut()?;
             st.outcomes.push(o.clone());
+            // Rolling window, same discipline as `activity` above.
+            if st.outcomes.len() > MAX_OUTCOME_ENTRIES {
+                let drop = st.outcomes.len() - MAX_OUTCOME_ENTRIES;
+                st.outcomes.drain(0..drop);
+            }
         }
         self.mark(DirtyKinds::OUTCOMES.with(DirtyKinds::ACTIVITY));
         self.note(kind, summary, Some(o.intent_id.clone()), None);
@@ -1234,6 +1289,40 @@ where
     }
 }
 
+/// Replace an oversized `Outcome::data` with a truncation marker before
+/// the outcome lands in DO state. See `MAX_OUTCOME_DATA_BYTES` for the
+/// budget reasoning.
+///
+/// Serializing to check the size is the only reliable way to answer
+/// "is this too big?" for an arbitrary JSON value -- a recursive
+/// size estimator would be more code for no benefit, and would have to
+/// be kept in sync with the serializer anyway. The cost is one
+/// `to_string()` per recorded outcome; outcomes arrive at human action
+/// speed, not request speed, so this is invisible.
+///
+/// Truncation is byte-bounded but character-safe: the preview is cut at
+/// the largest byte index that is also a character boundary, so a
+/// multi-byte UTF-8 sequence is never split in half. `original_bytes`
+/// reports the pre-truncation serialized size, so a consumer can tell
+/// it was cut and by how much.
+fn cap_outcome_data(mut o: Outcome) -> Outcome {
+    if let Some(data) = &o.data {
+        let serialized = data.to_string();
+        if serialized.len() > MAX_OUTCOME_DATA_BYTES {
+            let mut end = MAX_OUTCOME_DATA_BYTES;
+            while end > 0 && !serialized.is_char_boundary(end) {
+                end -= 1;
+            }
+            o.data = Some(serde_json::json!({
+                "truncated": true,
+                "original_bytes": serialized.len(),
+                "preview": &serialized[..end],
+            }));
+        }
+    }
+    o
+}
+
 fn knock_expired(k: &Knock, now_unix: i64, now_iso: &str) -> bool {
     if k.expires_unix != 0 {
         now_unix > k.expires_unix
@@ -1677,5 +1766,92 @@ mod tests {
         assert!(k.list_checkpoints(&t.token).is_empty());
         // The knock survives -- deleting a key does not erase what it did.
         assert_eq!(k.key_log(&t.token).len(), 1);
+    }
+
+    #[test]
+    fn activity_is_capped_and_keeps_the_most_recent() {
+        let mut k = k(1_700_000_000);
+        // Drive past the cap. Calling `note` directly is what these
+        // tests are for -- it is the exact function that owns the cap,
+        // and using it skips the intent/approval/digest machinery that
+        // would add nothing but runtime to a test about a Vec bound.
+        for i in 0..(MAX_ACTIVITY_ENTRIES + 50) {
+            k.note(
+                &format!("test.{i}"),
+                format!("event {i}"),
+                None,
+                None,
+            );
+        }
+        let activity = k.activity().unwrap();
+        assert_eq!(activity.len(), MAX_ACTIVITY_ENTRIES);
+        // The most recent event is the last one -- `kind` on the last
+        // entry is `test.<MAX+49>`.
+        assert_eq!(
+            activity.last().unwrap().kind,
+            format!("test.{}", MAX_ACTIVITY_ENTRIES + 49)
+        );
+        // The oldest retained entry is NOT `test.0`; the first 50 were
+        // dropped to make room.
+        assert_eq!(activity.first().unwrap().kind, format!("test.{}", 50));
+    }
+
+    #[test]
+    fn outcome_data_over_cap_is_truncated_with_a_marker() {
+        let mut k = k(1_700_000_000);
+        let huge = "x".repeat(MAX_OUTCOME_DATA_BYTES * 4);
+        let outcome = Outcome {
+            id: "out_1".into(),
+            intent_id: "int_1".into(),
+            execution_id: "exec_1".into(),
+            grant_id: "grt_1".into(),
+            resource: "hostos.inventory".into(),
+            operation: Permission::Read,
+            ok: true,
+            data: Some(serde_json::json!({ "big": huge })),
+            error: None,
+            provider: "test".into(),
+            mock: Some(true),
+            at: "2026-09-18T00:00:00Z".into(),
+        };
+        pollster::block_on(k.record_outcome(outcome)).unwrap();
+        let stored = k.outcomes_for_intent("int_1").unwrap();
+        assert_eq!(stored.len(), 1);
+        let data = stored[0].data.as_ref().unwrap();
+        assert_eq!(
+            data.get("truncated").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(
+            data.get("original_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap()
+                > MAX_OUTCOME_DATA_BYTES as u64
+        );
+        let preview = data.get("preview").and_then(|v| v.as_str()).unwrap();
+        assert!(preview.len() <= MAX_OUTCOME_DATA_BYTES);
+    }
+
+    #[test]
+    fn outcome_data_under_cap_is_untouched() {
+        let mut k = k(1_700_000_000);
+        let small = serde_json::json!({ "workers": 1, "buckets": 1 });
+        let outcome = Outcome {
+            id: "out_2".into(),
+            intent_id: "int_2".into(),
+            execution_id: "exec_2".into(),
+            grant_id: "grt_2".into(),
+            resource: "cloudflare.inventory".into(),
+            operation: Permission::Read,
+            ok: true,
+            data: Some(small.clone()),
+            error: None,
+            provider: "test".into(),
+            mock: Some(true),
+            at: "2026-09-18T00:00:00Z".into(),
+        };
+        pollster::block_on(k.record_outcome(outcome)).unwrap();
+        let stored = k.outcomes_for_intent("int_2").unwrap();
+        assert_eq!(stored[0].data.as_ref().unwrap(), &small);
     }
 }
