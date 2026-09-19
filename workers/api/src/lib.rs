@@ -233,6 +233,42 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // treatment. Token validity is still checked in the DO's own
     // `route_scratch` against that DO's own kernel -- this block only
     // decides *which* DO gets asked, never whether the token is good.
+    // `/internal/outcome` is called by the orchestrator, HMAC'd with the
+    // worker-wide `CURATOM_HMAC_KEY`, and carries no token and no
+    // session. Before this block, it fell through to the generic
+    // session-or-default routing below and landed on the founder's DO
+    // regardless of whose knock produced it -- so a non-founder's remote
+    // knock had its outcome either dropped (the founder's kernel had
+    // never heard of that grant_id) or misfiled into the founder's
+    // activity feed. The handoff envelope now carries `owner_id`
+    // verbatim, the orchestrator echoes it back, and this block routes
+    // on it. Same shape as the other four owner-prefix routes: this
+    // only decides *which* DO gets asked, never whether the request is
+    // legitimate -- the DO's own HMAC check is still the gate.
+    //
+    // `owner_id` here is the DO's own name (`organic_rajvansh`,
+    // `user_<hex>`), not a token prefix -- unlike every other routing
+    // block above, it does not go through `owner_key_from_token`. A
+    // missing or empty value falls back to the founder's DO, which is
+    // exactly the pre-fix behavior, so an orchestrator that has not yet
+    // been updated to echo `owner_id` still works.
+    if req.path() == "/internal/outcome" && req.method() == Method::Post {
+        let headers = req.headers().clone();
+        let body_text = req.text().await?;
+        let owner_id = serde_json::from_str::<Value>(&body_text)
+            .ok()
+            .and_then(|v| v.get("owner_id").and_then(|t| t.as_str()).map(String::from))
+            .filter(|s| !s.is_empty());
+        let owner_key = owner_id.unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(wasm_bindgen::JsValue::from_str(&body_text)));
+        let rebuilt = Request::new_with_init(&req.url()?.to_string(), &init)?;
+        let ns = env.durable_object("CURATOM_KERNEL")?;
+        let id = ns.id_from_name(&owner_key)?;
+        return id.get_stub()?.fetch_with_request(rebuilt).await;
+    }
     if req.path().starts_with("/scratch/") && req.method() == Method::Get {
         let url = req.url()?;
         let token = url
@@ -1121,6 +1157,11 @@ impl CuratomKernel {
         if let Err(r) = self.owner(hr).await {
             return r;
         }
+        // Captured once, at the top, before any `self.kernel.borrow()`
+        // runs -- the handoff envelope below needs it, and the outcome
+        // callback that comes back through `/internal/outcome` will be
+        // routed by it. See `fetch()`'s `/internal/outcome` block.
+        let owner_id = self.owner_id.borrow().clone();
         let ts_secret = match self.env.secret("TURNSTILE_SECRET") {
             Ok(s) => s.to_string(),
             Err(_) => return (500, json!({ "error": "turnstile not configured" })),
@@ -1333,6 +1374,7 @@ impl CuratomKernel {
             "knock_id": knock_id,
             "intent_id": secret_intent,
             "requester_id": secret_requester,
+            "owner_id": owner_id,
             "valhalla_sandbox_id": valhalla_sandbox_id,
             "actions": remote_actions,
         });
@@ -1908,6 +1950,20 @@ impl CuratomKernel {
         let Ok(body) = serde_json::from_str::<Value>(&hr.body) else {
             return (400, json!({ "error": "invalid_json" }));
         };
+
+        // Defense in depth against the routing in `fetch()` sending this
+        // outcome to the wrong DO. The HMAC already gates this endpoint,
+        // so this is not a security boundary -- it is a guard against a
+        // routing bug silently misattributing an outcome to the wrong
+        // account, which is exactly the failure the routing fix closed.
+        // A missing `owner_id` is accepted for backward compatibility
+        // with an orchestrator that has not yet been updated to send it.
+        if let Some(envelope_owner) = body.get("owner_id").and_then(|v| v.as_str()) {
+            let this_owner = self.owner_id.borrow().clone();
+            if envelope_owner != this_owner {
+                return (403, json!({ "error": "owner_mismatch" }));
+            }
+        }
 
         let outcome = Outcome {
             id: curatom_crypto::random_id("out"),
