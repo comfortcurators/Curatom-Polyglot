@@ -1,7 +1,7 @@
 //! Capability kernel. TTL as integers. No Cloudflare imports.
 
 use curatom_crypto::{iso_plus_secs, random_id, request_digest, sha256_hex};
-use curatom_ports::{ArtifactStore, Clock, EventLedger, StateStore};
+use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
 use curatom_protocol::*;
 use curatom_resource_registry::known_resource;
 
@@ -19,6 +19,11 @@ where
     artifacts: A,
     clock: C,
     state: Option<KernelState>,
+    /// Which `KernelState` fields have changed since the last successful
+    /// `persist()`. Set by every mutation, cleared by `persist()`. Never
+    /// serialized -- it describes the write that is *about to* happen,
+    /// not anything about the state itself.
+    dirty: DirtyKinds,
 }
 
 impl<S, L, A, C> Kernel<S, L, A, C>
@@ -36,6 +41,7 @@ where
             artifacts,
             clock,
             state: None,
+            dirty: DirtyKinds::new(),
         }
     }
 
@@ -48,11 +54,15 @@ where
     }
 
     pub async fn load(&mut self) -> Result<(), String> {
-        let mut state = self.store.get().await?.unwrap_or_default();
+        let mut state = self.store.load().await?.unwrap_or_default();
         if state.owner_id.is_empty() {
             state.owner_id = self.owner_id.clone();
         }
         self.state = Some(state);
+        // Loading does not mark anything dirty: whatever the store held
+        // is now the baseline, and `persist()` on a fresh kernel with no
+        // mutations writes nothing.
+        self.dirty = DirtyKinds::new();
         Ok(())
     }
 
@@ -65,8 +75,25 @@ where
     }
 
     async fn persist(&mut self) -> Result<(), String> {
+        if self.dirty.is_empty() {
+            return Ok(());
+        }
         let s = self.st()?.clone();
-        self.store.put(&s).await
+        let dirty = self.dirty;
+        self.store.persist(&s, &dirty).await?;
+        // Clear only after a successful write. A failed persist leaves
+        // the dirty set intact so the next persist retries the same
+        // fields -- the alternative silently loses a mutation.
+        self.dirty = DirtyKinds::new();
+        Ok(())
+    }
+
+    /// Mark a field dirty. Called by every mutating method after it has
+    /// actually changed the corresponding slice of `self.state`. Small
+    /// and inline; the compiler folds the repeated calls into a single
+    /// store because `DirtyKinds` is a plain `u16`.
+    fn mark(&mut self, kind: DirtyKinds) {
+        self.dirty = self.dirty.with(kind);
     }
 
     fn note(&mut self, kind: &str, summary: impl Into<String>, intent_id: Option<String>, approval_id: Option<String>) {
@@ -80,6 +107,10 @@ where
                 approval_id,
             });
         }
+        // `note` pushes into `activity` on every call, so it owns the
+        // ACTIVITY bit itself -- callers that mark ACTIVITY too are
+        // redundant but not wrong; the bit is idempotent.
+        self.mark(DirtyKinds::ACTIVITY);
     }
 
     pub fn parse_intent_text(text: &str) -> (Vec<String>, Vec<Permission>) {
@@ -128,6 +159,7 @@ where
             st.intents.insert(iid.clone(), intent.clone());
             st.approvals.insert(aid.clone(), approval);
         }
+        self.mark(DirtyKinds::INTENTS.with(DirtyKinds::APPROVALS).with(DirtyKinds::ACTIVITY));
         self.note("intent.created", "I heard you.", Some(iid), Some(aid));
         let _ = self.ledger.append("intent.created", &intent.id).await;
         self.persist().await?;
@@ -167,6 +199,7 @@ where
             st.intents.insert(iid.clone(), intent);
             st.approvals.insert(aid.clone(), approval.clone());
         }
+        self.mark(DirtyKinds::INTENTS.with(DirtyKinds::APPROVALS).with(DirtyKinds::ACTIVITY));
         self.note(
             "inorganic.submitted",
             format!("{} wants access", req.requester_id),
@@ -214,6 +247,7 @@ where
             let st = self.st_mut()?;
             st.owner = Some(record.clone());
         }
+        self.mark(DirtyKinds::META.with(DirtyKinds::ACTIVITY));
         self.note(
             "owner.enrolled",
             format!("{oid} enrolled"),
@@ -253,6 +287,7 @@ where
             }
             a.status = status;
         }
+        self.mark(DirtyKinds::APPROVALS.with(DirtyKinds::ACTIVITY));
         let a = self.get_approval(approval_id)?.unwrap();
         let kind = match decision {
             ApprovalDecision::Approve => "approval.approved",
@@ -300,6 +335,7 @@ where
             st.grants.insert(secret.grant_id.clone(), secret.clone());
             st.issued.insert(approval_id.to_string());
         }
+        self.mark(DirtyKinds::GRANTS.with(DirtyKinds::ISSUED).with(DirtyKinds::ACTIVITY));
         self.note(
             "grant.issued",
             "A grant was issued.",
@@ -351,6 +387,7 @@ where
             }
             st.consumed.insert(key);
         }
+        self.mark(DirtyKinds::CONSUMED.with(DirtyKinds::ACTIVITY));
         self.note(
             "capability.consumed",
             format!("spent {resource} {}", op.as_str()),
@@ -377,6 +414,7 @@ where
             let st = self.st_mut()?;
             st.outcomes.push(o.clone());
         }
+        self.mark(DirtyKinds::OUTCOMES.with(DirtyKinds::ACTIVITY));
         self.note(kind, summary, Some(o.intent_id.clone()), None);
         self.persist().await?;
         Ok(())
@@ -468,6 +506,7 @@ where
             let st = self.st_mut()?;
             st.tokens.insert(t.token.clone(), t.clone());
         }
+        self.mark(DirtyKinds::TOKENS.with(DirtyKinds::ACTIVITY));
         self.note(
             "key.created",
             format!("{label} {}", &token[..token.len().min(24)]),
@@ -485,6 +524,7 @@ where
                 return Err("unknown_token".into());
             }
         }
+        self.mark(DirtyKinds::TOKENS.with(DirtyKinds::ACTIVITY));
         self.note(
             "key.revoked",
             token[..token.len().min(24)].to_string(),
@@ -508,6 +548,7 @@ where
             let st = self.st_mut()?;
             st.tokens.remove(token);
         }
+        self.mark(DirtyKinds::TOKENS.with(DirtyKinds::ACTIVITY));
         self.note(
             "key.rerolled",
             format!("{} ({} -> successor)", old.label, &token[..token.len().min(24)]),
@@ -536,6 +577,7 @@ where
             let st = self.st_mut()?;
             st.checkpoints.remove(token);
         }
+        self.mark(DirtyKinds::TOKENS.with(DirtyKinds::CHECKPOINTS).with(DirtyKinds::ACTIVITY));
         self.note(
             "key.deleted",
             format!("{label} {}", &token[..token.len().min(24)]),
@@ -667,6 +709,7 @@ where
                 t.last_used_at = Some(used_at);
             }
         }
+        self.mark(DirtyKinds::KNOCKS.with(DirtyKinds::TOKENS).with(DirtyKinds::ACTIVITY));
         self.note("knock.created", kname, Some(kid), None);
         self.persist().await?;
         Ok(k)
@@ -712,6 +755,7 @@ where
                 }
             }
         }
+        self.mark(DirtyKinds::KNOCKS.with(DirtyKinds::ACTIVITY));
         for id in expired {
             self.note("knock.expired", id, None, None);
         }
@@ -748,6 +792,7 @@ where
                 expired_now = false;
             }
         }
+        self.mark(DirtyKinds::KNOCKS.with(DirtyKinds::ACTIVITY));
         if expired_now {
             self.persist().await?;
             return Err("knock_expired".into());
@@ -848,6 +893,7 @@ where
             let st = self.st_mut()?;
             st.freezes.insert(f.id.clone(), f.clone());
         }
+        self.mark(DirtyKinds::FREEZES.with(DirtyKinds::ACTIVITY));
         self.note("freeze.created", format!("{scope} {reason}"), None, None);
         self.persist().await?;
         Ok(f)
@@ -874,6 +920,7 @@ where
             f.release_parity_ok = Some(parity_ok);
             f.clone()
         };
+        self.mark(DirtyKinds::FREEZES.with(DirtyKinds::ACTIVITY));
         self.note("freeze.released", freeze_id.to_string(), None, None);
         self.persist().await?;
         Ok(result)
@@ -942,6 +989,7 @@ where
             let st = self.st_mut()?;
             st.connectors.insert(c.id.clone(), c.clone());
         }
+        self.mark(DirtyKinds::CONNECTORS.with(DirtyKinds::ACTIVITY));
         self.note("connector.created", name, None, None);
         self.persist().await?;
         Ok(c)
@@ -955,6 +1003,7 @@ where
                 None => return Err("unknown_connector".into()),
             }
         };
+        self.mark(DirtyKinds::CONNECTORS.with(DirtyKinds::ACTIVITY));
         self.note("connector.deleted", name, None, None);
         self.persist().await
     }
@@ -1009,6 +1058,7 @@ where
             let st = self.st_mut()?;
             st.repositories.insert(r.id.clone(), r.clone());
         }
+        self.mark(DirtyKinds::REPOSITORIES.with(DirtyKinds::ACTIVITY));
         self.note("repository.added", name, None, None);
         self.persist().await?;
         Ok(r)
@@ -1022,6 +1072,7 @@ where
                 None => return Err("unknown_repository".into()),
             }
         };
+        self.mark(DirtyKinds::REPOSITORIES.with(DirtyKinds::ACTIVITY));
         self.note("repository.removed", name, None, None);
         self.persist().await
     }
@@ -1044,6 +1095,7 @@ where
             r.manifest_ref = Some(manifest_ref);
             r.name.clone()
         };
+        self.mark(DirtyKinds::REPOSITORIES.with(DirtyKinds::ACTIVITY));
         self.note(
             "repository.synced",
             format!("{name}: {file_count} files"),
@@ -1097,6 +1149,7 @@ where
                 list.drain(0..overflow);
             }
         }
+        self.mark(DirtyKinds::CHECKPOINTS.with(DirtyKinds::ACTIVITY));
         self.note("checkpoint.created", note, None, None);
         self.persist().await?;
         Ok(c)
@@ -1124,6 +1177,7 @@ where
             let st = self.st_mut()?;
             st.whitepaper = if is_clear { None } else { Some(text) };
         }
+        self.mark(DirtyKinds::WHITEPAPER.with(DirtyKinds::ACTIVITY));
         self.note(
             if is_clear { "whitepaper.cleared" } else { "whitepaper.updated" },
             String::new(),
@@ -1164,6 +1218,7 @@ where
             st.grants.insert(secret.grant_id.clone(), secret.clone());
             st.issued.insert(knock.id.clone());
         }
+        self.mark(DirtyKinds::GRANTS.with(DirtyKinds::ISSUED).with(DirtyKinds::ACTIVITY));
         self.note(
             "grant.issued",
             "A grant was issued.",

@@ -1,7 +1,7 @@
 //! In-memory substrate. This is what `cargo test --workspace` runs against.
 
 use async_trait::async_trait;
-use curatom_ports::{ArtifactStore, Clock, EventLedger, StateStore};
+use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
 use curatom_protocol::KernelState;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,10 +20,15 @@ impl MemoryStateStore {
 
 #[async_trait(?Send)]
 impl StateStore for MemoryStateStore {
-    async fn get(&self) -> Result<Option<KernelState>, String> {
+    async fn load(&self) -> Result<Option<KernelState>, String> {
         Ok(self.inner.lock().unwrap().clone())
     }
-    async fn put(&self, state: &KernelState) -> Result<(), String> {
+    async fn persist(&self, state: &KernelState, _dirty: &DirtyKinds) -> Result<(), String> {
+        // The memory store keeps one whole copy, so the dirty set is
+        // meaningless here -- it is still accepted so the memory store
+        // and the DO store are interchangeable at every call site, which
+        // is what lets the kernel be tested against memory and deployed
+        // against Cloudflare without a second code path.
         *self.inner.lock().unwrap() = Some(state.clone());
         Ok(())
     }

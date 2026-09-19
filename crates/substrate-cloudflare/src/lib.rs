@@ -1,7 +1,7 @@
 //! Cloudflare substrate. wasm only. Not a workspace member.
 
 use async_trait::async_trait;
-use curatom_ports::{ArtifactStore, Clock, EventLedger, StateStore};
+use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
 use curatom_protocol::{HttpRequestDto, Identity, IdentityKind, KernelState};
 use std::sync::Mutex;
 
@@ -31,16 +31,21 @@ impl DOStateStore {
     }
 }
 
+/// Still single-blob in 5a. This is a byte-for-byte drop-in for the old
+/// implementation so the trait change compiles and the deployed Worker
+/// keeps working while 5b lands the per-entity split and its migration.
+/// The `dirty` set is accepted and ignored -- correctness first, then the
+/// optimization, and never both in one unverified step on a live system.
 #[async_trait(?Send)]
 impl StateStore for DOStateStore {
-    async fn get(&self) -> Result<Option<KernelState>, String> {
+    async fn load(&self) -> Result<Option<KernelState>, String> {
         let storage = self.storage.lock().map_err(|e| e.to_string())?;
         match storage.get::<KernelState>("kernel_state").await {
             Ok(s) => Ok(s),
             Err(_) => Ok(None),
         }
     }
-    async fn put(&self, state: &KernelState) -> Result<(), String> {
+    async fn persist(&self, state: &KernelState, _dirty: &DirtyKinds) -> Result<(), String> {
         let storage = self.storage.lock().map_err(|e| e.to_string())?;
         storage
             .put("kernel_state", state)

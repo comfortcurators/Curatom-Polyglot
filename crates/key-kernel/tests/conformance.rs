@@ -8,7 +8,7 @@
 
 use curatom_key_kernel::Kernel;
 use curatom_organic_router::{activity_view, approval_view, intent_view, leak_check};
-use curatom_ports::StateStore;
+use curatom_ports::{DirtyKinds, StateStore};
 use curatom_protocol::*;
 use curatom_substrate_memory::{FrozenClock, MemoryArtifacts, MemoryLedger, MemoryStateStore};
 use pollster::block_on;
@@ -169,14 +169,14 @@ fn approval_binds_request_digest() {
 
     // Widen the card underneath the owner without re-deriving its digest.
     // This is what a compromised store, or a careless migration, looks like.
-    let mut state = block_on(rig.store.get()).unwrap().unwrap();
+    let mut state = block_on(rig.store.load()).unwrap().unwrap();
     state
         .approvals
         .get_mut(&appr.id)
         .unwrap()
         .resources
         .push("cloudflare.inventory".into());
-    block_on(rig.store.put(&state)).unwrap();
+    block_on(rig.store.persist(&state, &DirtyKinds::ALL)).unwrap();
 
     let mut k = rig.kernel(1);
     let err = block_on(k.decide_approval(&appr.id, ApprovalDecision::Approve)).unwrap_err();
@@ -207,7 +207,7 @@ fn duplicate_approval_does_not_mint_second_grant() {
     let mut k2 = rig.kernel(2);
     assert!(block_on(k2.issue_grant(&appr.id)).unwrap().is_none());
 
-    let state = block_on(rig.store.get()).unwrap().unwrap();
+    let state = block_on(rig.store.load()).unwrap().unwrap();
     assert_eq!(state.grants.len(), 1);
     assert!(state.grants.contains_key(&first.grant_id));
 }
