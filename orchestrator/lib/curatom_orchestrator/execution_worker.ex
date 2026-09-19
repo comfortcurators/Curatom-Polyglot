@@ -18,6 +18,7 @@ defmodule CuratomOrchestrator.ExecutionWorker do
             CuratomOrchestrator.KernelClient.report_outcome(%{
               job_id: job.job_id,
               intent_id: job.intent_id,
+              owner_id: job.owner_id,
               ok: false,
               error: "attestation_rejected"
             })
@@ -66,6 +67,7 @@ defmodule CuratomOrchestrator.ExecutionWorker do
     CuratomOrchestrator.KernelClient.report_outcome(%{
       job_id: job.job_id,
       intent_id: job.intent_id,
+      owner_id: job.owner_id,
       grant_id: claims["grant_id"],
       resource: claims["resource"],
       operation: claims["operation"],
