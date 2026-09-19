@@ -814,6 +814,14 @@ struct DeleteAccountBody {
     /// sharp. Case-sensitive on purpose.
     #[serde(default)]
     confirm: String,
+    /// The account's current password. Proves intent and identity in
+    /// one field -- `DELETE` says "I mean to destroy this," the
+    /// password says "and I am the person who owns it." A stolen
+    /// session cookie is enough to read and write; it must not be
+    /// enough to permanently destroy. Same reasoning and same
+    /// mechanism as `handle_change_password`.
+    #[serde(default)]
+    password: String,
 }
 
 /// Hard delete. Requires an authenticated session and the confirm word.
@@ -846,30 +854,40 @@ pub async fn handle_delete_account(mut req: Request, env: &Env) -> Result<Respon
     if body.confirm != "DELETE" {
         return json_response(400, json!({
             "error": "confirmation_required",
-            "detail": "send {\"confirm\":\"DELETE\"} to proceed",
+            "detail": "send {\"confirm\":\"DELETE\",\"password\":\"<your current password>\"} to proceed",
         }));
     }
 
     let db = env.d1("CURATOM_LEDGER")?;
 
-    // Email is needed for the pending_verifications sweep -- that table
-    // is keyed by email, not user_id, because the row predates the user.
+    // One query, three things: the email (for the pending_verifications
+    // sweep, which is keyed by email not user_id because that row
+    // predates the user), the password hash and salt (for the
+    // re-authentication below), and the presence of the row (which
+    // distinguishes "valid session, missing user" -- a double-submit
+    // or a session that outlived a deletion -- from the real case).
     #[derive(Deserialize)]
-    struct EmailRow {
+    struct UserRow {
         email: String,
+        password_hash: String,
+        password_salt: String,
     }
-    let email_row: Option<EmailRow> = db
-        .prepare("SELECT email FROM users WHERE id = ?1 LIMIT 1")
+    let Some(user_row): Option<UserRow> = db
+        .prepare("SELECT email, password_hash, password_salt FROM users WHERE id = ?1 LIMIT 1")
         .bind(&[user_id.clone().into()])?
         .first(None)
-        .await?;
-    let Some(email_row) = email_row else {
-        // The session was valid but the user row is already gone --
-        // a double-submit of this exact endpoint, or a session that
-        // outlived a deletion that happened some other way. Same
-        // answer either way: nothing to do.
+        .await?
+    else {
         return json_response(200, json!({ "ok": true, "already_deleted": true }));
     };
+
+    // Re-authenticate. The confirm word proves intent; the password
+    // proves the caller is the owner. Both are required because both
+    // fail independently -- a stolen cookie carries the first but not
+    // the second, and a typo carries neither.
+    if !verify_password(&body.password, &user_row.password_salt, &user_row.password_hash) {
+        return json_response(401, json!({ "error": "password_incorrect" }));
+    }
 
     // Ordering: children before parent. Each statement is a single D1
     // write and the whole block is not a transaction -- D1 serializes
@@ -891,7 +909,7 @@ pub async fn handle_delete_account(mut req: Request, env: &Env) -> Result<Respon
         .run()
         .await?;
     db.prepare("DELETE FROM pending_verifications WHERE email = ?1")
-        .bind(&[email_row.email.into()])?
+        .bind(&[user_row.email.into()])?
         .run()
         .await?;
     db.prepare("DELETE FROM users WHERE id = ?1")
