@@ -1186,10 +1186,30 @@ where
             .unwrap_or_default()
     }
 
+    /// Marker-only checkpoint. Preserves the pre-Phase-4 signature so
+    /// existing callers and tests keep working; a caller that has a
+    /// snapshot (the Worker, after Valhalla has uploaded one) uses
+    /// `create_checkpoint_with_snapshot` instead.
     pub async fn create_checkpoint(
         &mut self,
         token: &str,
         note: String,
+    ) -> Result<Checkpoint, String> {
+        self.create_checkpoint_with_snapshot(token, note, None, 0).await
+    }
+
+    /// Create a checkpoint, optionally with a snapshot behind it. The
+    /// snapshot itself is created by the Worker calling out to Valhalla
+    /// -- this crate does no I/O, so the only thing it does with the
+    /// ref is record it. See `workers/valhalla/src/index.ts`'s
+    /// `/snapshot` endpoint for the writer, and `/restore` for the
+    /// reader.
+    pub async fn create_checkpoint_with_snapshot(
+        &mut self,
+        token: &str,
+        note: String,
+        snapshot_ref: Option<String>,
+        file_count: u64,
     ) -> Result<Checkpoint, String> {
         if !self.token_matches(token) {
             return Err("token_not_recognized".into());
@@ -1198,10 +1218,22 @@ where
         if note.len() > 2000 {
             return Err("note_too_long".into());
         }
+        if let Some(ref r) = snapshot_ref {
+            // Path-traversal guard. The ref is opaque to the kernel --
+            // it never reads it -- but it is echoed back to the
+            // dashboard and passed to Valhalla on restore, so a
+            // malformed one is worth rejecting at the boundary rather
+            // than trusting whatever produced it.
+            if r.len() > 512 || r.contains("..") {
+                return Err("bad_snapshot_ref".into());
+            }
+        }
         let c = Checkpoint {
             id: random_id("chk"),
             note: note.clone(),
             created_at: self.clock.now_iso(),
+            snapshot_ref,
+            file_count,
         };
         {
             let st = self.st_mut()?;
@@ -1218,6 +1250,23 @@ where
         self.note("checkpoint.created", note, None, None);
         self.persist().await?;
         Ok(c)
+    }
+
+    /// Look up a single checkpoint by id, scoped to its token. Returns
+    /// `None` if the id is unknown or belongs to a different key. Used
+    /// by the Worker's `/internal/checkpoint-resolve`, which Valhalla
+    /// calls during provision to fetch the manifest ref for a
+    /// checkpoint it was told to restore from.
+    pub fn get_checkpoint(
+        &self,
+        token: &str,
+        checkpoint_id: &str,
+    ) -> Result<Option<Checkpoint>, String> {
+        Ok(self
+            .st()?
+            .checkpoints
+            .get(token)
+            .and_then(|list| list.iter().find(|c| c.id == checkpoint_id).cloned()))
     }
 
     // ---- whitepaper ----
@@ -1776,6 +1825,57 @@ mod tests {
         assert!(k.list_checkpoints(&t.token).is_empty());
         // The knock survives -- deleting a key does not erase what it did.
         assert_eq!(k.key_log(&t.token).len(), 1);
+    }
+
+    #[test]
+    fn marker_only_checkpoint_has_no_snapshot() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("t".into(), None)).unwrap();
+        let c = pollster::block_on(k.create_checkpoint(&t.token, "before".into())).unwrap();
+        assert!(c.snapshot_ref.is_none());
+        assert_eq!(c.file_count, 0);
+    }
+
+    #[test]
+    fn snapshot_checkpoint_records_ref_and_count() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("t".into(), None)).unwrap();
+        let c = pollster::block_on(k.create_checkpoint_with_snapshot(
+            &t.token,
+            "with content".into(),
+            Some("checkpoints/manifests/org_owner/abc/chk_1.json".into()),
+            17,
+        ))
+        .unwrap();
+        assert_eq!(c.file_count, 17);
+        assert_eq!(
+            c.snapshot_ref.as_deref(),
+            Some("checkpoints/manifests/org_owner/abc/chk_1.json")
+        );
+    }
+
+    #[test]
+    fn bad_snapshot_ref_is_rejected() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("t".into(), None)).unwrap();
+        let err = pollster::block_on(k.create_checkpoint_with_snapshot(
+            &t.token,
+            "x".into(),
+            Some("../../etc/passwd".into()),
+            0,
+        ))
+        .unwrap_err();
+        assert_eq!(err, "bad_snapshot_ref");
+    }
+
+    #[test]
+    fn get_checkpoint_scopes_to_its_token() {
+        let mut k = k(1_700_000_000);
+        let a = pollster::block_on(k.create_key("a".into(), None)).unwrap();
+        let b = pollster::block_on(k.create_key("b".into(), None)).unwrap();
+        let c = pollster::block_on(k.create_checkpoint(&a.token, "a's".into())).unwrap();
+        assert!(k.get_checkpoint(&a.token, &c.id).unwrap().is_some());
+        assert!(k.get_checkpoint(&b.token, &c.id).unwrap().is_none());
     }
 
     #[test]

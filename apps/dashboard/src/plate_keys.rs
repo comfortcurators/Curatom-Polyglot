@@ -409,7 +409,21 @@ fn CheckpointsModal(info: api::KeyInfo, on_close: Callback<()>) -> impl IntoView
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
     let new_note = RwSignal::new(String::new());
+    // Which live sandbox to snapshot when the operator chooses to save
+    // *with* content. Fetched from the same `/organic/valhalla/sessions`
+    // the Valhalla plate uses, and filtered to `alive` -- a closed
+    // session has no container to `exec find` inside.
+    let live_sessions = RwSignal::new(Vec::<api::ValhallaSession>::new());
+    let sandbox_id_snapshot = RwSignal::new(None::<String>);
     let token = info.token.clone();
+
+    Effect::new(move |_| {
+        spawn_local(async move {
+            if let Ok(list) = api::valhalla_sessions().await {
+                live_sessions.set(list.into_iter().filter(|s| s.alive).collect());
+            }
+        });
+    });
 
     let refresh = {
         let token = token.clone();
@@ -439,8 +453,9 @@ fn CheckpointsModal(info: api::KeyInfo, on_close: Callback<()>) -> impl IntoView
             busy.set(true);
             error.set(None);
             let token = token.clone();
+            let sandbox_id = sandbox_id_snapshot.get();
             spawn_local(async move {
-                match api::create_checkpoint(&token, &note).await {
+                match api::create_checkpoint(&token, &note, sandbox_id.as_deref()).await {
                     Ok(_) => {
                         new_note.set(String::new());
                         busy.set(false);
@@ -497,6 +512,47 @@ fn CheckpointsModal(info: api::KeyInfo, on_close: Callback<()>) -> impl IntoView
                 prop:value=move || new_note.get()
                 on:input=move |ev| new_note.set(event_target_value(&ev))
             />
+
+            <Show when=move || !live_sessions.get().is_empty()>
+                <p class="dim" style="font-size:12px;margin:10px 0 4px">
+                    "Snapshot workspace from (optional):"
+                </p>
+                <div class="row" style="flex-wrap:wrap;gap:6px">
+                    <button
+                        class=move || if sandbox_id_snapshot.get().is_none() { "chip on" } else { "chip" }
+                        on:click=move |_| sandbox_id_snapshot.set(None)
+                    >
+                        "NONE"
+                    </button>
+                    <For
+                        each={move || live_sessions.get()}
+                        key=|s| s.sandbox_id.clone()
+                        children=move |s: api::ValhallaSession| {
+                            let sid_for_cmp = s.sandbox_id.clone();
+                            let sid_for_click = s.sandbox_id.clone();
+                            view! {
+                                <button
+                                    class=move || if sandbox_id_snapshot.get().as_deref() == Some(sid_for_cmp.as_str()) {
+                                        "chip on"
+                                    } else {
+                                        "chip"
+                                    }
+                                    on:click=move |_| sandbox_id_snapshot.set(Some(sid_for_click.clone()))
+                                >
+                                    {s.label.clone()}
+                                </button>
+                            }
+                        }
+                    />
+                </div>
+            </Show>
+
+            <p class="dim" style="font-size:12px;margin:8px 0 0">
+                "NONE saves a marker only. Choosing a session captures
+                that sandbox's /workspace, so the checkpoint can be
+                restored into a future session."
+            </p>
+
             <div class="row" style="margin-top:8px">
                 <button class="btn-ghost" disabled=move || busy.get() on:click=move |_| on_close.run(())>
                     "CLOSE"
@@ -506,7 +562,7 @@ fn CheckpointsModal(info: api::KeyInfo, on_close: Callback<()>) -> impl IntoView
                     disabled=move || busy.get() || new_note.get().trim().is_empty()
                     on:click=create
                 >
-                    {move || if busy.get() { "…" } else { "SAVE CHECKPOINT" }}
+                    {move || if busy.get() { "…" } else if sandbox_id_snapshot.get().is_some() { "SAVE WITH SNAPSHOT" } else { "SAVE CHECKPOINT" }}
                 </button>
             </div>
         </Sheet>

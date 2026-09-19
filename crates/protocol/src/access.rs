@@ -48,16 +48,33 @@ pub struct OrganicToken {
 }
 
 /// A named point in a key's own history -- "what state was I working
-/// from." Bounded scope for now: created by hand or by a future
-/// sandbox action, listed, and nothing else yet. What it snapshots (a
-/// repository's manifest ref, a sandbox's working directory) is up to
-/// whoever creates one; this type only carries the identity and the
-/// note describing it.
+/// from."
+///
+/// Two kinds, distinguished by `snapshot_ref`:
+///   * marker-only -- `snapshot_ref: None`. Existed before Phase 4 and
+///     still legal: the operator is writing a note-to-self about a
+///     point in time without capturing anything behind it.
+///   * snapshot -- `snapshot_ref: Some("checkpoints/manifests/...")`.
+///     An R2 manifest listing every file under `/workspace` at the
+///     moment the checkpoint was created, plus content-addressed
+///     blobs for the file contents. Restore from a snapshot is
+///     `Valhalla`'s `/restore` endpoint reading that manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: String,
     pub note: String,
     pub created_at: String,
+    /// R2 key of the snapshot manifest, or `None` for a marker-only
+    /// checkpoint. `serde(default)` so a checkpoint created before
+    /// this field existed still loads; it reads as marker-only, which
+    /// is what it was.
+    #[serde(default)]
+    pub snapshot_ref: Option<String>,
+    /// Number of files captured in the snapshot. `0` for marker-only.
+    /// Reported to the dashboard so the operator can see whether a
+    /// checkpoint has content behind it before trying to restore one.
+    #[serde(default)]
+    pub file_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

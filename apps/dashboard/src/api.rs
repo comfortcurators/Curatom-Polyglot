@@ -648,6 +648,10 @@ pub struct Checkpoint {
     pub id: String,
     pub note: String,
     pub created_at: String,
+    #[serde(default)]
+    pub snapshot_ref: Option<String>,
+    #[serde(default)]
+    pub file_count: u64,
 }
 
 pub async fn list_checkpoints(token: &str) -> ApiResult<Vec<Checkpoint>> {
@@ -661,15 +665,27 @@ pub async fn list_checkpoints(token: &str) -> ApiResult<Vec<Checkpoint>> {
 #[derive(Serialize)]
 struct CreateCheckpointBody<'a> {
     note: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox_id: Option<&'a str>,
 }
 
-pub async fn create_checkpoint(token: &str, note: &str) -> ApiResult<Checkpoint> {
+/// `sandbox_id` is optional. When provided, the Worker calls Valhalla
+/// to snapshot that sandbox's `/workspace` and the checkpoint carries
+/// content; when omitted, the checkpoint is a marker only. The
+/// dashboard surfaces both: "SAVE CHECKPOINT" writes a marker, "SAVE
+/// WITH SNAPSHOT" (enabled only when a live session is selected) writes
+/// a snapshot.
+pub async fn create_checkpoint(
+    token: &str,
+    note: &str,
+    sandbox_id: Option<&str>,
+) -> ApiResult<Checkpoint> {
     post(
         &format!(
             "/organic/keys/{}/checkpoints",
             js_sys::encode_uri_component(token)
         ),
-        &CreateCheckpointBody { note },
+        &CreateCheckpointBody { note, sandbox_id },
         201,
     )
     .await

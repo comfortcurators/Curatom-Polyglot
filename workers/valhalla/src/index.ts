@@ -74,6 +74,52 @@ export default {
       // SDK: get-or-create. Container starts on first exec, not here.
       const sandbox = getSandbox(env.Sandbox, sandboxId);
 
+      // If a checkpoint was named, restore it *before* the repository
+      // materialization below -- the checkpoint represents the state
+      // the operator deliberately saved, so it wins over a fresh
+      // repository pull if both are requested. The manifest ref comes
+      // from the Worker, not from the caller: the caller supplies an
+      // opaque `checkpoint_id` and the Worker resolves it against the
+      // token's own kernel, so a checkpoint belonging to a different
+      // key cannot be restored here.
+      const checkpointId = params.get("checkpoint_id");
+      let restored: string[] = [];
+      if (checkpointId) {
+        const resolveBody =
+          `token=${encodeURIComponent(token)}` +
+          `&checkpoint_id=${encodeURIComponent(checkpointId)}`;
+        const resolveSig = await internalHmac(env, resolveBody);
+        const resolveResp = await env.CURATOM_KERNEL.fetch(
+          `https://kernel/internal/checkpoint-resolve?${resolveBody}`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              "x-curatom-hmac": resolveSig,
+            },
+            body: resolveBody,
+          }
+        );
+        if (!resolveResp.ok) {
+          const detail = await resolveResp.text();
+          return jsonErr(400, `checkpoint_resolve_failed:${detail}`);
+        }
+        const resolved = (await resolveResp.json()) as {
+          manifest_ref: string | null;
+          file_count: number;
+        };
+        if (resolved.manifest_ref) {
+          restored = await restoreFromManifest(env, sandbox, resolved.manifest_ref);
+          await appendLog(
+            env,
+            sandboxId,
+            "checkpoint_restore",
+            checkpointId,
+            `${restored.length} files`
+          );
+        }
+      }
+
       // If this knock also named a repository, materialize what's
       // actually stored for it (the manifest `h_sync_repository` or
       // `h_upload_repository` wrote to R2) into the workspace before
@@ -124,6 +170,7 @@ export default {
         url: `${env.VALHALLA_BASE_URL}/valhalla/${sandboxId}`,
         frozen: freezeIds,
         materialized,
+        restored,
       });
     }
 
@@ -205,6 +252,48 @@ export default {
         recorded_at: now,
         note: "Parity claim recorded. To release freezes and close, call close with parity_ok=true and this digest as parity_note.",
       });
+    }
+
+    if (path.match(/^\/valhalla\/[^/]+\/snapshot$/) && request.method === "GET") {
+      const sandboxId = path.split("/")[2];
+      const keyHash = params.get("key_hash") ?? "";
+      const checkpointId = params.get("checkpoint_id") ?? "";
+      if (!keyHash) return jsonErr(400, "missing_key_hash");
+      if (!checkpointId) return jsonErr(400, "missing_checkpoint_id");
+
+      try {
+        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const result = await snapshotWorkspace(env, sandbox, keyHash, checkpointId, sandboxId);
+        await appendLog(
+          env,
+          sandboxId,
+          "snapshot",
+          checkpointId,
+          `${result.file_count} files`
+        );
+        return jsonOk(result);
+      } catch (e) {
+        return jsonErr(500, `snapshot_failed: ${String(e)}`);
+      }
+    }
+
+    if (path.match(/^\/valhalla\/[^/]+\/restore$/) && request.method === "GET") {
+      // Direct restore without the round-trip through provision. Used
+      // for a manual re-apply against a running session; provision
+      // calls `restoreFromManifest` inline instead.
+      const sandboxId = path.split("/")[2];
+      const manifestRef = params.get("manifest_ref") ?? "";
+      if (!manifestRef) return jsonErr(400, "missing_manifest_ref");
+      if (manifestRef.includes("..")) return jsonErr(400, "bad_manifest_ref");
+
+      try {
+        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const written = await restoreFromManifest(env, sandbox, manifestRef);
+        await appendLog(env, sandboxId, "restore", manifestRef, `${written.length} files`);
+        return jsonOk({ manifest_ref: manifestRef, written });
+      } catch (e) {
+        return jsonErr(500, `restore_failed: ${String(e)}`);
+      }
     }
 
     if (path.match(/^\/valhalla\/[^/]+\/close$/) && request.method === "GET") {
@@ -406,6 +495,171 @@ async function materializeRepository(
       written.push(f.path);
     } catch {
       // One bad file must not fail provisioning for the rest.
+    }
+  }
+  return written;
+}
+
+/// Walk `/workspace` in the sandbox, upload each file's content to a
+/// content-addressed R2 key, and write a manifest listing every file
+/// plus its hash and size. Returns the manifest's R2 key and the number
+/// of files captured.
+///
+/// Bounds mirror `materializeRepository`'s but are larger because a
+/// working sandbox legitimately holds more than a curated repository:
+/// 500 files, 2 MB/file, 50 MB total. Over those, the snapshot is
+/// truncated rather than failing -- a partial snapshot that restores
+/// most of a workspace is more useful than no snapshot at all, and the
+/// manifest's own `truncated` flag says which happened.
+async function snapshotWorkspace(
+  env: Env,
+  sandbox: ReturnType<typeof getSandbox>,
+  keyHash: string,
+  checkpointId: string,
+  sandboxId: string,
+): Promise<{ manifest_ref: string; file_count: number; truncated: boolean }> {
+  const MAX_FILES = 500;
+  const MAX_FILE_BYTES = 2_000_000;
+  const MAX_TOTAL_BYTES = 50_000_000;
+
+  // `.git` is excluded because a workspace snapshot is about files the
+  // operator cares about, not the repository's internal object store,
+  // which is both huge and reproducible from the working tree.
+  //
+  // Newline-separated, not `-print0`: verified against a real sandbox
+  // container (Phase 4 verification, 19 Sep 2026) that NUL bytes do
+  // not survive `exec`'s stdout on its way through this SDK's JSON
+  // transport -- `-print0`'s output arrived with every path's NUL
+  // separator silently stripped, concatenating every result into one
+  // unsplittable string and producing a snapshot with 0 files. Plain
+  // `find` (default `-print`, newline-terminated) round-trips intact.
+  // This assumes no path under `/workspace` contains a literal
+  // newline, which is true of every real filename this tool will ever
+  // see and is the same assumption `materializeRepository` already
+  // makes about its own manifest paths.
+  const findResult = await sandbox.exec(
+    "find /workspace -type f -not -path '*/.git/*' -not -path '*/.cache/*'"
+  );
+  const raw = (findResult as { stdout?: string }).stdout ?? "";
+  const allPaths = raw
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    // Path-traversal guard. `find` should never produce one, but the
+    // value is about to be used as an R2 key suffix and as a
+    // `writeFile` target on restore, so it's checked at the source.
+    .filter((p) => !p.includes(".."));
+
+  const truncated = allPaths.length > MAX_FILES;
+  const paths = allPaths.slice(0, MAX_FILES);
+
+  const entries: { path: string; sha256: string; size: number }[] = [];
+  let total = 0;
+  let stoppedBySize = false;
+
+  for (const filePath of paths) {
+    let content: string;
+    try {
+      const read = await sandbox.readFile(filePath);
+      // The SDK's `readFile` returns a result object
+      // (`{success, path, content, ...}`), not a raw string -- unlike
+      // what the `typeof read === "string"` shape elsewhere in this
+      // file assumes. Verified against the local sandbox container's
+      // real output (Phase 4 verification, 19 Sep 2026): serializing
+      // the whole object instead of extracting `.content` silently
+      // wrote the wrapper's metadata into every snapshot blob rather
+      // than the file's actual bytes. The `/read` endpoint above has
+      // the same `typeof`-guard shape and is very likely wrong the
+      // same way; not fixed here -- it predates this change and fixing
+      // it is a decision for whoever owns that endpoint's callers, not
+      // a side effect of this one.
+      if (read && typeof read === "object" && "content" in read) {
+        content = String((read as { content: unknown }).content ?? "");
+      } else {
+        content = typeof read === "string" ? read : JSON.stringify(read);
+      }
+    } catch {
+      continue;
+    }
+    if (content.length > MAX_FILE_BYTES) continue;
+    if (total + content.length > MAX_TOTAL_BYTES) {
+      stoppedBySize = true;
+      break;
+    }
+    const hash = await sha256(content);
+    await env.CURATOM_ARTIFACTS.put(`checkpoints/blobs/${keyHash}/${hash}`, content);
+    entries.push({ path: filePath, sha256: hash, size: content.length });
+    total += content.length;
+  }
+
+  const manifest = {
+    sandbox_id: sandboxId,
+    key_hash: keyHash,
+    created_at: new Date().toISOString(),
+    file_count: entries.length,
+    total_bytes: total,
+    truncated: truncated || stoppedBySize,
+    files: entries,
+  };
+  const manifestRef = `checkpoints/manifests/${keyHash}/${checkpointId}.json`;
+  await env.CURATOM_ARTIFACTS.put(manifestRef, JSON.stringify(manifest));
+
+  return {
+    manifest_ref: manifestRef,
+    file_count: entries.length,
+    truncated: manifest.truncated,
+  };
+}
+
+/// Inverse of `snapshotWorkspace`. Reads the manifest, fetches each
+/// blob by hash, **verifies the hash on read**, and writes the file to
+/// the sandbox. A blob whose content no longer matches its hash is
+/// skipped rather than written -- corruption or a hash-lookup collision
+/// would otherwise silently restore the wrong bytes into a workspace the
+/// operator believes is a faithful restore.
+///
+/// One bad file does not fail the restore; the same discipline as
+/// `materializeRepository`. The return value lists what was actually
+/// written, so a caller can compare against the manifest's `file_count`
+/// and see whether anything was skipped.
+async function restoreFromManifest(
+  env: Env,
+  sandbox: ReturnType<typeof getSandbox>,
+  manifestRef: string,
+): Promise<string[]> {
+  const obj = await env.CURATOM_ARTIFACTS.get(manifestRef);
+  if (!obj) return [];
+
+  let manifest: {
+    files?: { path: string; sha256: string; size: number }[];
+  };
+  try {
+    manifest = JSON.parse(await obj.text());
+  } catch {
+    return [];
+  }
+
+  // The key_hash prefix on blob keys is recoverable from the manifest
+  // ref itself: `checkpoints/manifests/<key_hash>/<id>.json`. Reading it
+  // back from the ref rather than trusting a second parameter keeps the
+  // two lookups (manifest, blobs) provably scoped to the same owner.
+  const keyHash = manifestRef.split("/")[2];
+  if (!keyHash) return [];
+
+  const written: string[] = [];
+  for (const f of (manifest.files ?? []).slice(0, 500)) {
+    if (!f.path || f.path.includes("..")) continue;
+    const blobRef = `checkpoints/blobs/${keyHash}/${f.sha256}`;
+    const blob = await env.CURATOM_ARTIFACTS.get(blobRef);
+    if (!blob) continue;
+    const content = await blob.text();
+    const check = await sha256(content);
+    if (check !== f.sha256) continue;
+    try {
+      await sandbox.writeFile(f.path, content);
+      written.push(f.path);
+    } catch {
+      // One bad file must not fail the restore for the rest.
     }
   }
   return written;

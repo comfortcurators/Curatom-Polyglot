@@ -146,6 +146,14 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let owner_key = owner_key_or_default(&env, token.as_deref())?;
         return forward_to_owner_do(req, &env, owner_key).await;
     }
+    if req.path() == "/internal/checkpoint-resolve" && req.method() == Method::Post {
+        // Same shape as authorize-provision above: token in the query
+        // string, no session, called by Valhalla mid-provision.
+        let url = req.url()?;
+        let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
+        let owner_key = owner_key_or_default(&env, token.as_deref())?;
+        return forward_to_owner_do(req, &env, owner_key).await;
+    }
     if (req.path() == "/internal/freeze" || req.path() == "/internal/release-session")
         && req.method() == Method::Post
     {
@@ -259,19 +267,23 @@ fn owner_key_from_token(token: &str) -> Option<String> {
 /// which is the same 401 an unknown token always produced.
 ///
 /// Used by every route in `fetch()` that authenticates by bearer token
-/// without a session cookie. All seven of them, in the order they
-/// appear in that function: `/inorganic/knock`, `/organic/keys/verify`,
-/// `/internal/authorize-provision`, `/internal/freeze` and
-/// `/internal/release-session`, `/inorganic/submit` and
-/// `/inorganic/handoff`, `/internal/outcome`, and `/scratch/*`.
+/// without a session cookie. Eight of them, in the order they appear in
+/// that function: `/inorganic/knock`, `/organic/keys/verify`,
+/// `/internal/authorize-provision`, `/internal/checkpoint-resolve`,
+/// `/internal/freeze` and `/internal/release-session`,
+/// `/inorganic/submit` and `/inorganic/handoff`, `/internal/outcome`,
+/// and `/scratch/*`.
 ///
 /// That list is not decorative. Each of those routes was originally
 /// missing this treatment, and each time the bug -- a request landing on
 /// the founder's DO regardless of whose token it presented -- was found
-/// only by testing against a non-founder account. If an eighth route
-/// is ever added that authenticates by bearer token, it needs this
-/// function too, and the way to check is: does the route read a token
-/// from somewhere the caller controls? If yes, it needs this.
+/// only by testing against a non-founder account. `/internal/checkpoint-resolve`
+/// is the one this comment itself predicted, and it got the treatment
+/// the first time, in the same commit that added the route -- the
+/// prediction did its job. If a ninth route is ever added that
+/// authenticates by bearer token, it needs this function too, and the
+/// way to check is: does the route read a token from somewhere the
+/// caller controls? If yes, it needs this.
 ///
 /// The `/internal/outcome` route is the one exception: its identity
 /// field is `owner_id`, not a token, so it resolves its own fallback
@@ -494,6 +506,9 @@ impl DurableObject for CuratomKernel {
             ("POST", "/internal/release-session") => self.h_internal_release_session(&hr).await,
             ("POST", "/internal/authorize-provision") => {
                 self.h_internal_authorize_provision(&hr).await
+            }
+            ("POST", "/internal/checkpoint-resolve") => {
+                self.h_internal_checkpoint_resolve(&hr).await
             }
             ("GET", "/organic/frozen") => self.h_frozen_list(&hr).await,
             ("GET", "/organic/connectors") => self.h_list_connectors(&hr).await,
@@ -995,13 +1010,91 @@ impl CuratomKernel {
         struct Body {
             #[serde(default)]
             note: String,
+            /// Optional. When provided, the Worker calls Valhalla to
+            /// snapshot that sandbox's `/workspace` and passes the
+            /// resulting manifest ref to the kernel. The client
+            /// supplies it from the live session it wants to capture;
+            /// no lookup into `sessions` because a sandbox_id that
+            /// doesn't correspond to a live container will fail at the
+            /// `snapshot` endpoint, which is the honest error.
+            #[serde(default)]
+            sandbox_id: Option<String>,
         }
         let body: Body = serde_json::from_str(&hr.body).unwrap_or_default();
+
+        // If a sandbox was named, snapshot first. This is the only
+        // thing in the whole create-checkpoint path that talks to
+        // Valhalla; everything else is kernel-local. A failure here is
+        // a hard error -- the operator asked for a checkpoint *with
+        // content*, and silently giving them a marker instead would be
+        // the wrong kind of fallback.
+        let (snapshot_ref, file_count) = match body.sandbox_id.as_deref() {
+            None => (None, 0u64),
+            Some(sandbox_id) => {
+                if sandbox_id.is_empty() || sandbox_id.contains("..") {
+                    return (400, json!({ "error": "bad_sandbox_id" }));
+                }
+                let key_hash = curatom_crypto::sha256_hex(token.as_bytes());
+                let checkpoint_id = curatom_crypto::random_id("chk");
+                let valhalla_url = self
+                    .env
+                    .var("VALHALLA_URL")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|_| "https://valhalla.rajvansh.dev".into());
+                let url = format!(
+                    "{}/valhalla/{}/snapshot?key_hash={}&checkpoint_id={}",
+                    valhalla_url,
+                    urlencoding::encode(sandbox_id),
+                    urlencoding::encode(&key_hash),
+                    urlencoding::encode(&checkpoint_id),
+                );
+                let mut init = RequestInit::new();
+                init.with_method(Method::Get);
+                let req = match Request::new_with_init(&url, &init) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return (500, json!({ "error": format!("valhalla build: {e}") }))
+                    }
+                };
+                let mut resp = match Fetch::Request(req).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return (502, json!({ "error": format!("valhalla send: {e}") }))
+                    }
+                };
+                if resp.status_code() >= 400 {
+                    let detail = resp.text().await.unwrap_or_default();
+                    return (
+                        502,
+                        json!({ "error": "snapshot_failed", "detail": detail }),
+                    );
+                }
+                let body_json: Value = match resp.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return (502, json!({ "error": format!("valhalla parse: {e}") }))
+                    }
+                };
+                let manifest_ref = body_json
+                    .get("manifest_ref")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let count = body_json
+                    .get("file_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                (manifest_ref, count)
+            }
+        };
+
         let mut k = self.kernel.borrow_mut();
         let Some(k) = k.as_mut() else {
             return (503, json!({ "error": "kernel_not_ready" }));
         };
-        match k.create_checkpoint(token, body.note).await {
+        match k
+            .create_checkpoint_with_snapshot(token, body.note, snapshot_ref, file_count)
+            .await
+        {
             Ok(c) => (201, json!(c)),
             Err(e) => (400, json!({ "error": e })),
         }
@@ -2129,6 +2222,50 @@ impl CuratomKernel {
             }
         }
         (200, json!({ "released": released, "frozen": to_release }))
+    }
+
+    /// Valhalla calls this during provision to fetch the manifest ref
+    /// for a `checkpoint_id` it was handed. HMAC-gated like every other
+    /// `/internal/*` route. The token is required in the query string
+    /// (form-encoded body) so the kernel can scope the lookup to that
+    /// key -- a checkpoint belonging to a different key cannot be
+    /// resolved here even by a caller that knows its id.
+    async fn h_internal_checkpoint_resolve(&self, hr: &HttpRequestDto) -> Reply {
+        if !self.hmac_ok(hr) {
+            return (
+                401,
+                json!({ "error": if hr.header("x-curatom-hmac").is_none() { "missing hmac" } else { "bad hmac" } }),
+            );
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(token) = params.get("token").cloned() else {
+            return (400, json!({ "error": "missing_token" }));
+        };
+        let Some(checkpoint_id) = params.get("checkpoint_id").cloned() else {
+            return (400, json!({ "error": "missing_checkpoint_id" }));
+        };
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.get_checkpoint(&token, &checkpoint_id) {
+            Ok(Some(c)) => (
+                200,
+                json!({
+                    "manifest_ref": c.snapshot_ref,
+                    "file_count": c.file_count,
+                }),
+            ),
+            Ok(None) => (404, json!({ "error": "unknown_checkpoint" })),
+            Err(e) => (500, json!({ "error": e })),
+        }
     }
 
     async fn h_internal_authorize_provision(&self, hr: &HttpRequestDto) -> Reply {
