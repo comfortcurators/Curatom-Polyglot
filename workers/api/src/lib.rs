@@ -114,51 +114,25 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return passkey::handle_delete(req, &env, &credential_id).await;
     }
 
-    // The machine-facing knock surface. A machine presenting a token has
-    // no session cookie -- never has, never will -- so it cannot be
-    // routed by the session logic below. Before 2026-09-18 this simply
-    // fell through to the founder's own singleton DO regardless of whose
-    // token was presented, so a non-founder account's key looked real
-    // (it listed, it showed a label) but no AI could ever knock with it:
-    // the knock always landed in a kernel that had never heard of that
-    // token, and refused it as unrecognized.
-    //
-    // `Kernel::create_key` now embeds its own `owner_id` as the token's
-    // prefix (`"{owner_id}.{random}"`) specifically so this routing can
-    // happen with no index or lookup: the DO name a knock needs is
-    // sitting right in the token text. Falls back to the founder's
-    // singleton only when no usable token is present at all -- the
-    // previous behaviour, kept as the floor, not the ceiling.
+    // ── Owner-prefix routing ──────────────────────────────────────────
+    // Every route below authenticates by bearer token, workspace id, or
+    // echoed owner_id -- never a session cookie -- so none of them can be
+    // routed by the session logic further down. Each was originally
+    // missing this treatment and landed on the founder's singleton DO
+    // regardless of whose credential it carried; see `owner_key_from_token`
+    // and `forward_to_owner_do`'s doc comments for the full history. All
+    // three helpers used here are defined below `fetch()`.
     if req.path() == "/inorganic/knock" && req.method() == Method::Get {
         let url = req.url()?;
         let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
-        let owner_key = token
-            .as_deref()
-            .and_then(owner_key_from_token)
-            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
-        let ns = env.durable_object("CURATOM_KERNEL")?;
-        let id = ns.id_from_name(&owner_key)?;
-        return id.get_stub()?.fetch_with_request(req).await;
+        let owner_key = owner_key_or_default(&env, token.as_deref())?;
+        return forward_to_owner_do(req, &env, owner_key).await;
     }
-    // Same trap as the two routes above, found while wiring Valhalla to a
-    // per-key workspace rather than the founder's singleton: this route
-    // carries a bearer token but no session cookie either, and every one
-    // of these fell through to the generic session-or-`CURATOM_OWNER_ID`
-    // routing below -- silently checking a non-founder's key against the
-    // *founder's* kernel instance, which has never heard of it. That made
-    // Valhalla provisioning (and the internal calls it makes mid-session)
-    // return `token_not_recognized` for literally every key but the
-    // founder's, regardless of whether the key was real.
     if req.path() == "/organic/keys/verify" && req.method() == Method::Get {
         let url = req.url()?;
         let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
-        let owner_key = token
-            .as_deref()
-            .and_then(owner_key_from_token)
-            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
-        let ns = env.durable_object("CURATOM_KERNEL")?;
-        let id = ns.id_from_name(&owner_key)?;
-        return id.get_stub()?.fetch_with_request(req).await;
+        let owner_key = owner_key_or_default(&env, token.as_deref())?;
+        return forward_to_owner_do(req, &env, owner_key).await;
     }
     if req.path() == "/internal/authorize-provision" && req.method() == Method::Post {
         // form-encoded, in the query string on this one (Valhalla builds
@@ -166,13 +140,8 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // rebuild needed, unlike /inorganic/submit below.
         let url = req.url()?;
         let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
-        let owner_key = token
-            .as_deref()
-            .and_then(owner_key_from_token)
-            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
-        let ns = env.durable_object("CURATOM_KERNEL")?;
-        let id = ns.id_from_name(&owner_key)?;
-        return id.get_stub()?.fetch_with_request(req).await;
+        let owner_key = owner_key_or_default(&env, token.as_deref())?;
+        return forward_to_owner_do(req, &env, owner_key).await;
     }
     if (req.path() == "/internal/freeze" || req.path() == "/internal/release-session")
         && req.method() == Method::Post
@@ -184,14 +153,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // `owner_key_from_token` parse recovers the owner.
         let url = req.url()?;
         let session_id = url.query_pairs().find(|(k, _)| k == "session_id").map(|(_, v)| v.into_owned());
-        let owner_key = session_id
-            .as_deref()
-            .and_then(|s| s.strip_prefix("vh-"))
-            .and_then(owner_key_from_token)
-            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
-        let ns = env.durable_object("CURATOM_KERNEL")?;
-        let id = ns.id_from_name(&owner_key)?;
-        return id.get_stub()?.fetch_with_request(req).await;
+        let stripped = session_id.as_deref().and_then(|s| s.strip_prefix("vh-"));
+        let owner_key = owner_key_or_default(&env, stripped)?;
+        return forward_to_owner_do(req, &env, owner_key).await;
     }
     if (req.path() == "/inorganic/submit" || req.path() == "/inorganic/handoff")
         && req.method() == Method::Post
@@ -201,50 +165,22 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // request has to be rebuilt with the same bytes before it can be
         // forwarded to the DO, which reads the body again itself.
         let headers = req.headers().clone();
+        let url = req.url()?.to_string();
         let body_text = req.text().await?;
         let token = serde_json::from_str::<Value>(&body_text)
             .ok()
             .and_then(|v| v.get("token").and_then(|t| t.as_str()).map(String::from));
-        let owner_key = token
-            .as_deref()
-            .and_then(owner_key_from_token)
-            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post)
-            .with_headers(headers)
-            .with_body(Some(wasm_bindgen::JsValue::from_str(&body_text)));
-        let rebuilt = Request::new_with_init(&req.url()?.to_string(), &init)?;
-        let ns = env.durable_object("CURATOM_KERNEL")?;
-        let id = ns.id_from_name(&owner_key)?;
-        return id.get_stub()?.fetch_with_request(rebuilt).await;
+        let owner_key = owner_key_or_default(&env, token.as_deref())?;
+        let rebuilt = rebuild_request(Method::Post, &url, headers, body_text)?;
+        return forward_to_owner_do(rebuilt, &env, owner_key).await;
     }
-    // The sketchpad surface -- every `/scratch/*` operation -- carries a
-    // machine token and no session cookie, by design: the LLM guide
-    // documents these as the machine's own endpoints. Before this block
-    // existed, they fell through to the generic session-or-default
-    // routing below and landed on the founder's singleton DO regardless
-    // of whose token was presented, which returned `token_not_recognized`
-    // for every non-founder key. The same trap as `/inorganic/knock`,
-    // `/organic/keys/verify`, `/internal/authorize-provision`, and the
-    // `/internal/freeze` / `/internal/release-session` pair -- each of
-    // which got this same fix earlier, each time with a comment saying
-    // so. The five are all the routes that authenticate by bearer token
-    // without a session; if a sixth is ever added, it needs the same
-    // treatment. Token validity is still checked in the DO's own
-    // `route_scratch` against that DO's own kernel -- this block only
-    // decides *which* DO gets asked, never whether the token is good.
     // `/internal/outcome` is called by the orchestrator, HMAC'd with the
     // worker-wide `CURATOM_HMAC_KEY`, and carries no token and no
-    // session. Before this block, it fell through to the generic
-    // session-or-default routing below and landed on the founder's DO
-    // regardless of whose knock produced it -- so a non-founder's remote
-    // knock had its outcome either dropped (the founder's kernel had
-    // never heard of that grant_id) or misfiled into the founder's
-    // activity feed. The handoff envelope now carries `owner_id`
-    // verbatim, the orchestrator echoes it back, and this block routes
-    // on it. Same shape as the other four owner-prefix routes: this
-    // only decides *which* DO gets asked, never whether the request is
-    // legitimate -- the DO's own HMAC check is still the gate.
+    // session. The handoff envelope carries `owner_id` verbatim, the
+    // orchestrator echoes it back, and this block routes on it. Same
+    // shape as the other owner-prefix routes: this only decides *which*
+    // DO gets asked, never whether the request is legitimate -- the DO's
+    // own HMAC check is still the gate.
     //
     // `owner_id` here is the DO's own name (`organic_rajvansh`,
     // `user_<hex>`), not a token prefix -- unlike every other routing
@@ -254,20 +190,21 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // been updated to echo `owner_id` still works.
     if req.path() == "/internal/outcome" && req.method() == Method::Post {
         let headers = req.headers().clone();
+        let url = req.url()?.to_string();
         let body_text = req.text().await?;
         let owner_id = serde_json::from_str::<Value>(&body_text)
             .ok()
             .and_then(|v| v.get("owner_id").and_then(|t| t.as_str()).map(String::from))
             .filter(|s| !s.is_empty());
+        // Not owner_key_or_default: owner_id here is already the DO's own
+        // name (no "prefix.random" shape to split), so running it through
+        // owner_key_from_token would find no '.' and silently fall back
+        // to the founder's DO for every real value. See
+        // owner_key_from_token's doc comment for why this route is the
+        // one exception.
         let owner_key = owner_id.unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post)
-            .with_headers(headers)
-            .with_body(Some(wasm_bindgen::JsValue::from_str(&body_text)));
-        let rebuilt = Request::new_with_init(&req.url()?.to_string(), &init)?;
-        let ns = env.durable_object("CURATOM_KERNEL")?;
-        let id = ns.id_from_name(&owner_key)?;
-        return id.get_stub()?.fetch_with_request(rebuilt).await;
+        let rebuilt = rebuild_request(Method::Post, &url, headers, body_text)?;
+        return forward_to_owner_do(rebuilt, &env, owner_key).await;
     }
     if req.path().starts_with("/scratch/") && req.method() == Method::Get {
         let url = req.url()?;
@@ -275,13 +212,8 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             .query_pairs()
             .find(|(k, _)| k == "token")
             .map(|(_, v)| v.into_owned());
-        let owner_key = token
-            .as_deref()
-            .and_then(owner_key_from_token)
-            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
-        let ns = env.durable_object("CURATOM_KERNEL")?;
-        let id = ns.id_from_name(&owner_key)?;
-        return id.get_stub()?.fetch_with_request(req).await;
+        let owner_key = owner_key_or_default(&env, token.as_deref())?;
+        return forward_to_owner_do(req, &env, owner_key).await;
     }
 
     // Which CuratomKernel instance this request reaches. A verified
@@ -310,6 +242,81 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
 /// is what actually accepts or refuses the knock.
 fn owner_key_from_token(token: &str) -> Option<String> {
     token.split_once('.').map(|(prefix, _)| prefix.to_string()).filter(|p| !p.is_empty())
+}
+
+/// Derive the Durable Object name a bearer-token request belongs to:
+/// the token's own prefix, or the founder's singleton when the token is
+/// absent or does not carry a prefix.
+///
+/// This function decides *which* DO answers a request. It never decides
+/// whether the request is *legitimate* -- every DO that receives a
+/// forwarded request still runs its own `token_matches` (or the
+/// equivalent) against its own stored state. A forged or unknown prefix
+/// just reaches a DO that has never heard of the token and refuses it,
+/// which is the same 401 an unknown token always produced.
+///
+/// Used by every route in `fetch()` that authenticates by bearer token
+/// without a session cookie. All seven of them, in the order they
+/// appear in that function: `/inorganic/knock`, `/organic/keys/verify`,
+/// `/internal/authorize-provision`, `/internal/freeze` and
+/// `/internal/release-session`, `/inorganic/submit` and
+/// `/inorganic/handoff`, `/internal/outcome`, and `/scratch/*`.
+///
+/// That list is not decorative. Each of those routes was originally
+/// missing this treatment, and each time the bug -- a request landing on
+/// the founder's DO regardless of whose token it presented -- was found
+/// only by testing against a non-founder account. If an eighth route
+/// is ever added that authenticates by bearer token, it needs this
+/// function too, and the way to check is: does the route read a token
+/// from somewhere the caller controls? If yes, it needs this.
+///
+/// The `/internal/outcome` route is the one exception: its identity
+/// field is `owner_id`, not a token, so it resolves its own fallback
+/// inline rather than through this function. That is the only place
+/// the shape differs.
+fn owner_key_or_default(env: &Env, token: Option<&str>) -> Result<String> {
+    Ok(token
+        .and_then(owner_key_from_token)
+        .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string()))
+}
+
+/// Rebuild a request whose body was consumed to extract identity. The
+/// two routes that need this (`/inorganic/submit`/`/inorganic/handoff`
+/// and `/internal/outcome`) both call `req.text()` to read a field out
+/// of the JSON body, which leaves nothing for the forwarded request to
+/// send. This reconstructs the request with the same method, URL,
+/// headers, and body bytes, so the DO that receives it sees what the
+/// original caller sent.
+///
+/// Order matters at the call site: `req.headers().clone()` and
+/// `req.url()` must be taken *before* `req.text()`, because `text()`
+/// consumes the body stream. This function only assembles; it does not
+/// read, so it cannot enforce that order itself. The two call sites
+/// both get it right; a third added later that gets it wrong will send
+/// a request with an empty body and no headers, which fails loudly at
+/// the DO rather than silently.
+fn rebuild_request(method: Method, url: &str, headers: Headers, body: String) -> Result<Request> {
+    let mut init = RequestInit::new();
+    init.with_method(method)
+        .with_headers(headers)
+        .with_body(Some(wasm_bindgen::JsValue::from_str(&body)));
+    Request::new_with_init(url, &init)
+}
+
+/// Send a request to the Durable Object named by `owner_key`. The four
+/// lines this replaces were duplicated at seven call sites, each one
+/// written out by hand because the previous one had been forgotten --
+/// which is how six of the seven came to exist in the first place.
+///
+/// This function is the single point through which every owner-prefix
+/// route reaches a DO. Grepping for its name lists every route that
+/// got the treatment; a new route that talks to a DO without going
+/// through this function is the next bug, and it is visible by
+/// inspection rather than only by testing.
+async fn forward_to_owner_do(req: Request, env: &Env, owner_key: String) -> Result<Response> {
+    let ns = env.durable_object("CURATOM_KERNEL")?;
+    let id = ns.id_from_name(&owner_key)?;
+    id.get_stub()?.fetch_with_request(req).await
 }
 
 #[durable_object]
