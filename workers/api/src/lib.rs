@@ -2379,8 +2379,12 @@ impl CuratomKernel {
         }
         // Untrusted caller input landing directly in R2 -- bounded the
         // same way a knock's fields are bounded in key-kernel, since
-        // nothing else here validates size before it's written.
-        if body.files.len() > 500 {
+        // nothing else here validates size before it's written. Kept in
+        // step with `zip_upload.rs`'s MAX_FILES -- a real multi-crate
+        // workspace clears 500 real files easily, and the client already
+        // filters to real files before sending, so this is a second,
+        // independent check of the same bound, not a stricter one.
+        if body.files.len() > 1500 {
             return (400, json!({ "error": "too_many_files" }));
         }
         let mut total_bytes: usize = 0;

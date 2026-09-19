@@ -5,7 +5,7 @@
 //!
 //! Bounds mirror the server's own (`h_upload_repository` in
 //! `workers/api/src/lib.rs`) so a rejection is a client-side error message
-//! instead of a wasted round trip: 500 files, 2MB/file, 20MB total. A
+//! instead of a wasted round trip: 1500 files, 2MB/file, 20MB total. A
 //! binary entry (not valid UTF-8) is skipped, not rejected -- an upload
 //! is meant for source, and a Curator connector or a knock resource reads
 //! the manifest as text; silently dropping a `.png` is the right call,
@@ -18,20 +18,25 @@ pub struct ZippedFile {
     pub content: String,
 }
 
-const MAX_FILES: usize = 500;
+const MAX_FILES: usize = 1500;
 const MAX_FILE_BYTES: usize = 2_000_000;
 const MAX_TOTAL_BYTES: usize = 20_000_000;
 
 pub fn extract(bytes: &[u8]) -> Result<Vec<ZippedFile>, String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a valid zip: {e}"))?;
-    if archive.len() > MAX_FILES {
-        return Err(format!("zip has {} entries, this account's cap is {MAX_FILES}", archive.len()));
-    }
 
     let mut out = Vec::new();
     let mut total: usize = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("reading entry {i}: {e}"))?;
+        // A directory is its own zip entry but is never a file this
+        // account can be asked about -- it must never count against
+        // MAX_FILES. A workspace with several crates and apps easily has
+        // more directory entries than real files, and the cap check used
+        // to run on `archive.len()` (every entry, directories included)
+        // *before* this skip, which rejected real repositories nowhere
+        // near 1500 actual files. Checked against `out.len()` below,
+        // after directories and everything else this loop skips.
         if entry.is_dir() {
             continue;
         }
@@ -51,6 +56,9 @@ pub fn extract(bytes: &[u8]) -> Result<Vec<ZippedFile>, String> {
         let Ok(content) = String::from_utf8(buf) else {
             continue; // binary entry -- skipped, not fatal, see module doc
         };
+        if out.len() >= MAX_FILES {
+            return Err(format!("zip has more than {MAX_FILES} real files, this account's cap"));
+        }
         total += content.len();
         if total > MAX_TOTAL_BYTES {
             return Err(format!("zip exceeds this account's {}MB cap", MAX_TOTAL_BYTES / 1_000_000));
