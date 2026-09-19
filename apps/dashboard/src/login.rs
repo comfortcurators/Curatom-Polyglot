@@ -44,6 +44,13 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let passkey_supported = RwSignal::new(passkey_browser::supported());
+    // A separate signal from `turnstile_token` above: Turnstile tokens
+    // are single-use, and register/login are two different ceremonies.
+    // Sharing one signal meant registering, then switching to sign-in,
+    // found a spent token and got a 403 the user could not see the cause
+    // of. The register gate resets its own on mode change, this one
+    // resets its own.
+    let login_turnstile_token = RwSignal::new(None::<String>);
 
     let do_login = move || {
         let user = username_or_email.get();
@@ -52,12 +59,21 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
             error.set(Some("Enter your username or email, and your password.".into()));
             return;
         }
+        let Some(ts) = login_turnstile_token.get() else {
+            error.set(Some("Complete the verification above first.".into()));
+            return;
+        };
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            match api::login(&user, &pass).await {
+            match api::login(&user, &pass, &ts).await {
                 Ok(()) => on_signed_in.run(()),
                 Err(e) => {
+                    // Turnstile tokens are single-use: a failed password
+                    // burns the token along with the attempt. Force a
+                    // fresh one so the next click is not silently
+                    // rejected by Siteverify.
+                    login_turnstile_token.set(None);
                     error.set(Some(readable_login_error(&e.to_string())));
                     busy.set(false);
                 }
@@ -228,6 +244,7 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                             if ev.key() == "Enter" { do_login(); }
                         }
                     />
+                    <TurnstileGate on_token=Callback::new(move |t| login_turnstile_token.set(Some(t))) />
                     <button class="btn" style="padding:14px" disabled=move || busy.get() on:click=move |_| do_login()>
                         {move || if busy.get() { "…" } else { "SIGN IN" }}
                     </button>
@@ -235,7 +252,11 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                         class="btn-ghost"
                         style="padding:8px;font-size:13px"
                         disabled=move || busy.get()
-                        on:click=move |_| { error.set(None); mode.set(Mode::ForgotPassword); }
+                        on:click=move |_| {
+                            error.set(None);
+                            login_turnstile_token.set(None);
+                            mode.set(Mode::ForgotPassword);
+                        }
                     >
                         "Forgot password?"
                     </button>
@@ -250,7 +271,11 @@ pub fn Login(on_signed_in: Callback<()>) -> impl IntoView {
                         class="btn-ghost"
                         style="padding:14px;margin-top:8px"
                         disabled=move || busy.get()
-                        on:click=move |_| { error.set(None); mode.set(Mode::Register); }
+                        on:click=move |_| {
+                            error.set(None);
+                            login_turnstile_token.set(None);
+                            mode.set(Mode::Register);
+                        }
                     >
                         "CREATE AN ACCOUNT"
                     </button>

@@ -138,6 +138,10 @@ pub struct KeyInfo {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub activity_count: u64,
+    #[serde(default)]
+    pub validity_seconds: Option<u64>,
+    #[serde(default)]
+    pub expires_unix: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +159,8 @@ pub async fn list_keys() -> ApiResult<Vec<KeyInfo>> {
 #[derive(Serialize)]
 struct CreateKeyBody<'a> {
     label: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validity_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,8 +168,29 @@ pub struct CreatedKey {
     pub file_text: String,
 }
 
-pub async fn create_key(label: &str) -> ApiResult<CreatedKey> {
-    post("/organic/keys", &CreateKeyBody { label }, 201).await
+pub async fn create_key(label: &str, validity_seconds: Option<u64>) -> ApiResult<CreatedKey> {
+    post(
+        "/organic/keys",
+        &CreateKeyBody { label, validity_seconds },
+        201,
+    )
+    .await
+}
+
+pub async fn reroll_key(token: &str) -> ApiResult<CreatedKey> {
+    post_empty_want(
+        &format!("/organic/keys/{}/reroll", js_sys::encode_uri_component(token)),
+        200,
+    )
+    .await
+}
+
+pub async fn delete_key(token: &str) -> ApiResult<()> {
+    post_empty(
+        &format!("/organic/keys/{}/delete", js_sys::encode_uri_component(token)),
+        200,
+    )
+    .await
 }
 
 pub async fn revoke_key(token: &str) -> ApiResult<()> {
@@ -300,12 +327,13 @@ pub async fn username_available(username: &str) -> ApiResult<UsernameAvailabilit
 struct LoginBody<'a> {
     username_or_email: &'a str,
     password: &'a str,
+    turnstile_token: &'a str,
 }
 
-pub async fn login(username_or_email: &str, password: &str) -> ApiResult<()> {
+pub async fn login(username_or_email: &str, password: &str, turnstile_token: &str) -> ApiResult<()> {
     let _: serde_json::Value = post(
         "/auth/login",
-        &LoginBody { username_or_email, password },
+        &LoginBody { username_or_email, password, turnstile_token },
         200,
     )
     .await?;
@@ -604,6 +632,38 @@ pub async fn upload_repository(id: &str, files: &[UploadFile<'_>]) -> ApiResult<
         &format!("/organic/repositories/{}/upload", js_sys::encode_uri_component(id)),
         &UploadRepositoryBody { files },
         200,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Checkpoint {
+    pub id: String,
+    pub note: String,
+    pub created_at: String,
+}
+
+pub async fn list_checkpoints(token: &str) -> ApiResult<Vec<Checkpoint>> {
+    get(&format!(
+        "/organic/keys/{}/checkpoints",
+        js_sys::encode_uri_component(token)
+    ))
+    .await
+}
+
+#[derive(Serialize)]
+struct CreateCheckpointBody<'a> {
+    note: &'a str,
+}
+
+pub async fn create_checkpoint(token: &str, note: &str) -> ApiResult<Checkpoint> {
+    post(
+        &format!(
+            "/organic/keys/{}/checkpoints",
+            js_sys::encode_uri_component(token)
+        ),
+        &CreateCheckpointBody { note },
+        201,
     )
     .await
 }

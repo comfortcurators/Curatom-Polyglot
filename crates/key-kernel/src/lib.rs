@@ -397,9 +397,14 @@ where
     }
 
     pub fn token_matches(&self, token: &str) -> bool {
-        self.st()
-            .map(|s| s.tokens.contains_key(token))
-            .unwrap_or(false)
+        let Ok(st) = self.st() else {
+            return false;
+        };
+        match st.tokens.get(token) {
+            Some(t) if t.expires_unix == 0 => true,
+            Some(t) => self.clock.now_unix() < t.expires_unix,
+            None => false,
+        }
     }
 
     pub fn get_key(&self, token: &str) -> Option<OrganicToken> {
@@ -415,13 +420,20 @@ where
         v
     }
 
-    pub async fn create_key(&mut self, label: String) -> Result<OrganicToken, String> {
+    pub async fn create_key(
+        &mut self,
+        label: String,
+        validity_seconds: Option<u64>,
+    ) -> Result<OrganicToken, String> {
         let label = label.trim().to_string();
         if label.is_empty() {
             return Err("label_required".into());
         }
         if label.len() > 80 {
             return Err("label_too_long".into());
+        }
+        if let Some(0) = validity_seconds {
+            return Err("validity_must_be_positive".into());
         }
         // The prefix used to be a hardcoded "RAJVANSH-" for every
         // account, not just the founder's -- which also meant nothing in
@@ -433,6 +445,11 @@ where
         // `fetch()`'s handling of `/inorganic/*` in `workers/api/src/lib.rs`.
         let raw = random_id("tok").to_uppercase().replace('_', "-");
         let token = format!("{}.{raw}", self.owner_id);
+        let now_unix = self.clock.now_unix();
+        let expires_unix = match validity_seconds {
+            Some(n) => now_unix + n as i64,
+            None => 0,
+        };
         let t = OrganicToken {
             token: token.clone(),
             owner_id: self.owner_id.clone(),
@@ -442,14 +459,10 @@ where
             // Minted once, here, and never rotated -- see the field's own
             // doc comment in curatom-protocol for why a revoke+recreate is
             // deliberately a new workspace rather than the old one
-            // continuing under a new token. Carries the same owner-prefix
-            // shape as `token` itself (`"{owner_id}.{random}"`) for the
-            // same reason: Valhalla's sandbox id is derived from this, and
-            // a machine reaching that sandbox has no session cookie either
-            // -- see `owner_key_from_token` and its use on
-            // `/internal/freeze` and `/internal/release-session` in
-            // `workers/api/src/lib.rs`.
+            // continuing under a new token.
             workspace_id: format!("{}.{}", self.owner_id, random_id("ws")),
+            validity_seconds,
+            expires_unix,
         };
         {
             let st = self.st_mut()?;
@@ -475,6 +488,57 @@ where
         self.note(
             "key.revoked",
             token[..token.len().min(24)].to_string(),
+            None,
+            None,
+        );
+        self.persist().await
+    }
+
+    /// Reroll: mint a replacement for `token` with the same label and
+    /// the same lifetime, and kill the old key in the same step. The
+    /// design distinguishes this from revoke -- revoke says "stop using
+    /// this key," reroll says "this key leaked or is being cycled; here
+    /// is its successor." One is a stop, the other is a transition, and
+    /// the audit trail has to say which happened.
+    pub async fn reroll_key(&mut self, token: &str) -> Result<OrganicToken, String> {
+        let old = self
+            .get_key(token)
+            .ok_or_else(|| "unknown_token".to_string())?;
+        {
+            let st = self.st_mut()?;
+            st.tokens.remove(token);
+        }
+        self.note(
+            "key.rerolled",
+            format!("{} ({} -> successor)", old.label, &token[..token.len().min(24)]),
+            None,
+            None,
+        );
+        self.persist().await?;
+        self.create_key(old.label, old.validity_seconds).await
+    }
+
+    /// Delete: like revoke, but also drops this key's own scoped state
+    /// (its checkpoint history). The knock history, ledger entries, and
+    /// billboard rows are deliberately *not* touched -- the design says a
+    /// key is "documented everywhere across your enterprise," and
+    /// deleting the key should not delete the record of what it was used
+    /// for.
+    pub async fn delete_key(&mut self, token: &str) -> Result<(), String> {
+        let label = {
+            let st = self.st_mut()?;
+            match st.tokens.remove(token) {
+                Some(t) => t.label,
+                None => return Err("unknown_token".into()),
+            }
+        };
+        {
+            let st = self.st_mut()?;
+            st.checkpoints.remove(token);
+        }
+        self.note(
+            "key.deleted",
+            format!("{label} {}", &token[..token.len().min(24)]),
             None,
             None,
         );
@@ -1236,11 +1300,11 @@ mod tests {
     #[test]
     fn token_rotate_kills_old() {
         let mut k = k(1_700_000_000);
-        let t1 = pollster::block_on(k.create_key("one".into())).unwrap();
+        let t1 = pollster::block_on(k.create_key("one".into(), None)).unwrap();
         assert!(t1.token.starts_with("org_owner."));
         assert!(k.token_matches(&t1.token));
         pollster::block_on(k.revoke_key(&t1.token)).unwrap();
-        let t2 = pollster::block_on(k.create_key("two".into())).unwrap();
+        let t2 = pollster::block_on(k.create_key("two".into(), None)).unwrap();
         assert_ne!(t1.token, t2.token);
         assert!(!k.token_matches(&t1.token));
         assert!(k.token_matches(&t2.token));
@@ -1263,7 +1327,7 @@ mod tests {
             FrozenClock::new(1_700_000_000),
         );
         pollster::block_on(k.load()).unwrap();
-        let t = pollster::block_on(k.create_key("mine".into())).unwrap();
+        let t = pollster::block_on(k.create_key("mine".into(), None)).unwrap();
         let recovered_owner = t.token.split_once('.').map(|(prefix, _)| prefix);
         assert_eq!(recovered_owner, Some("user_e659792109db4885a21923e3042ab112"));
     }
@@ -1271,7 +1335,7 @@ mod tests {
     #[test]
     fn knock_expires_after_ttl() {
         let mut k = k(1_700_000_000);
-        let t = pollster::block_on(k.create_key("t".into())).unwrap();
+        let t = pollster::block_on(k.create_key("t".into(), None)).unwrap();
         let kn = pollster::block_on(k.create_knock(
             t.token.clone(),
             "Claude".into(),
@@ -1307,7 +1371,7 @@ mod tests {
     #[test]
     fn freeze_blocks_new_knock() {
         let mut k = k(1_700_000_000);
-        let t = pollster::block_on(k.create_key("t".into())).unwrap();
+        let t = pollster::block_on(k.create_key("t".into(), None)).unwrap();
         pollster::block_on(k.freeze(
             "hostos.inventory".into(),
             "valhalla_session".into(),
@@ -1342,7 +1406,7 @@ mod tests {
     #[test]
     fn provision_requires_approved_knock() {
         let mut k = k(1_700_000_000);
-        let t = pollster::block_on(k.create_key("t".into())).unwrap();
+        let t = pollster::block_on(k.create_key("t".into(), None)).unwrap();
         let scope = vec!["hostos.inventory".to_string()];
         assert_eq!(
             k.authorize_valhalla_provision(&t.token, "knock_nope", &scope)
@@ -1449,8 +1513,8 @@ mod tests {
     #[test]
     fn every_key_gets_its_own_workspace_id() {
         let mut k = k(1_700_000_000);
-        let a = pollster::block_on(k.create_key("a".into())).unwrap();
-        let b = pollster::block_on(k.create_key("b".into())).unwrap();
+        let a = pollster::block_on(k.create_key("a".into(), None)).unwrap();
+        let b = pollster::block_on(k.create_key("b".into(), None)).unwrap();
         assert!(!a.workspace_id.is_empty());
         assert!(!b.workspace_id.is_empty());
         assert_ne!(a.workspace_id, b.workspace_id);
@@ -1459,8 +1523,8 @@ mod tests {
     #[test]
     fn checkpoints_are_scoped_to_their_own_token() {
         let mut k = k(1_700_000_000);
-        let a = pollster::block_on(k.create_key("a".into())).unwrap();
-        let b = pollster::block_on(k.create_key("b".into())).unwrap();
+        let a = pollster::block_on(k.create_key("a".into(), None)).unwrap();
+        let b = pollster::block_on(k.create_key("b".into(), None)).unwrap();
         pollster::block_on(k.create_checkpoint(&a.token, "before refactor".into())).unwrap();
         pollster::block_on(k.create_checkpoint(&a.token, "after refactor".into())).unwrap();
         assert_eq!(k.list_checkpoints(&a.token).len(), 2);
@@ -1498,5 +1562,65 @@ mod tests {
         pollster::block_on(theirs.load()).unwrap();
         assert_eq!(theirs.get_whitepaper(), None);
         assert_eq!(mine.get_whitepaper().as_deref(), Some("Mine, not shared."));
+    }
+
+    #[test]
+    fn key_with_validity_expires_and_stops_matching() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("short".into(), Some(60))).unwrap();
+        assert_eq!(t.expires_unix, 1_700_000_060);
+        assert_eq!(t.validity_seconds, Some(60));
+        assert!(k.token_matches(&t.token));
+        k.clock().set(1_700_000_060);
+        assert!(!k.token_matches(&t.token), "expired key must stop matching");
+        // It is still listed -- the dashboard shows expired keys with a
+        // "expired" label rather than silently hiding them.
+        assert!(k.list_keys().iter().any(|x| x.token == t.token));
+    }
+
+    #[test]
+    fn key_without_validity_never_expires() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("forever".into(), None)).unwrap();
+        assert_eq!(t.expires_unix, 0);
+        assert_eq!(t.validity_seconds, None);
+        k.clock().set(2_000_000_000);
+        assert!(k.token_matches(&t.token));
+    }
+
+    #[test]
+    fn reroll_kills_the_old_key_and_preserves_label_and_validity() {
+        let mut k = k(1_700_000_000);
+        let old = pollster::block_on(k.create_key("mine".into(), Some(3600))).unwrap();
+        let new = pollster::block_on(k.reroll_key(&old.token)).unwrap();
+        assert_ne!(old.token, new.token);
+        assert_eq!(new.label, "mine");
+        assert_eq!(new.validity_seconds, Some(3600));
+        assert!(!new.workspace_id.is_empty());
+        assert!(!k.token_matches(&old.token), "reroll must kill the old key");
+        assert!(k.token_matches(&new.token));
+    }
+
+    #[test]
+    fn delete_drops_checkpoints_but_keeps_knock_history() {
+        let mut k = k(1_700_000_000);
+        let t = pollster::block_on(k.create_key("doomed".into(), None)).unwrap();
+        pollster::block_on(k.create_checkpoint(&t.token, "before".into())).unwrap();
+        pollster::block_on(k.create_knock(
+            t.token.clone(),
+            "Agent".into(),
+            "r".into(),
+            vec!["hostos.inventory".into()],
+            vec![Permission::Read],
+            Duration::SingleUse,
+        ))
+        .unwrap();
+        assert_eq!(k.list_checkpoints(&t.token).len(), 1);
+
+        pollster::block_on(k.delete_key(&t.token)).unwrap();
+        assert!(!k.token_matches(&t.token));
+        assert!(k.list_checkpoints(&t.token).is_empty());
+        // The knock survives -- deleting a key does not erase what it did.
+        assert_eq!(k.key_log(&t.token).len(), 1);
     }
 }

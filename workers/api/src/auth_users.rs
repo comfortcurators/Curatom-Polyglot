@@ -65,6 +65,12 @@ struct LoginBody {
     username_or_email: String,
     #[serde(default)]
     password: String,
+    /// Cloudflare Turnstile response token from the sign-in page. Single
+    /// use, ~300s TTL; Siteverify is what actually decides. Required --
+    /// the design says the sign-in page has a human gate, and login is
+    /// the endpoint an unauthenticated attacker actually hammers.
+    #[serde(default)]
+    turnstile_token: String,
 }
 
 fn normalize_email(raw: &str) -> Option<String> {
@@ -547,6 +553,22 @@ pub async fn handle_login(mut req: Request, env: &Env) -> Result<Response> {
     let Some(body) = read_json::<LoginBody>(&mut req).await else {
         return json_response(400, json!({ "error": "malformed_body" }));
     };
+
+    // Turnstile first: an attacker must not be able to probe credentials
+    // at all without solving the challenge, so this runs before any
+    // database work, before password verification, before anything that
+    // could be timed or counted.
+    let turnstile_secret = match env.secret("TURNSTILE_SECRET") {
+        Ok(s) => s.to_string(),
+        Err(_) => return json_response(500, json!({ "error": "turnstile not configured" })),
+    };
+    let remote_ip = req.headers().get("cf-connecting-ip")?;
+    match crate::verify_turnstile(&turnstile_secret, &body.turnstile_token, remote_ip.as_deref()).await {
+        Ok(true) => {}
+        Ok(false) => return json_response(403, json!({ "error": "turnstile_failed" })),
+        Err(e) => return json_response(502, json!({ "error": e })),
+    }
+
     let login = body.username_or_email.trim().to_lowercase();
     if login.is_empty() {
         return json_response(401, json!({ "error": "invalid_credentials" }));

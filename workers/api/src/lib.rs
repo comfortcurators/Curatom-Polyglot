@@ -352,6 +352,20 @@ impl DurableObject for CuratomKernel {
                     .to_string();
                 self.h_revoke_key(&hr, &tok).await
             }
+            ("POST", p) if p.starts_with("/organic/keys/") && p.ends_with("/reroll") => {
+                let tok = p
+                    .trim_start_matches("/organic/keys/")
+                    .trim_end_matches("/reroll")
+                    .to_string();
+                self.h_reroll_key(&hr, &tok).await
+            }
+            ("POST", p) if p.starts_with("/organic/keys/") && p.ends_with("/delete") => {
+                let tok = p
+                    .trim_start_matches("/organic/keys/")
+                    .trim_end_matches("/delete")
+                    .to_string();
+                self.h_delete_key(&hr, &tok).await
+            }
             ("GET", p) if p.starts_with("/organic/keys/") && p.ends_with("/log") => {
                 let tok = p
                     .trim_start_matches("/organic/keys/")
@@ -700,7 +714,7 @@ impl CuratomKernel {
         match k.as_mut().unwrap().enroll_owner(record.clone()).await {
             Ok(r) => {
                 if k.as_ref().unwrap().list_keys().is_empty() {
-                    let _ = k.as_mut().unwrap().create_key("default".into()).await;
+                    let _ = k.as_mut().unwrap().create_key("default".into(), None).await;
                 }
                 (
                     201,
@@ -748,7 +762,7 @@ impl CuratomKernel {
         };
         let stamp = CloudflareClock.now_iso();
         let label = format!("rotated-{}", stamp.get(..10).unwrap_or("now"));
-        match k.create_key(label).await {
+        match k.create_key(label, None).await {
             Ok(t) => (
                 200,
                 json!({
@@ -781,6 +795,8 @@ impl CuratomKernel {
                     "created_at": t.created_at,
                     "last_used_at": t.last_used_at,
                     "activity_count": log.len(),
+                    "validity_seconds": t.validity_seconds,
+                    "expires_unix": t.expires_unix,
                 })
             })
             .collect();
@@ -800,17 +816,20 @@ impl CuratomKernel {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let validity_seconds = body.get("validity_seconds").and_then(|v| v.as_u64());
         let mut k = self.kernel.borrow_mut();
         let Some(k) = k.as_mut() else {
             return (503, json!({ "error": "kernel_not_ready" }));
         };
-        match k.create_key(label).await {
+        match k.create_key(label, validity_seconds).await {
             Ok(t) => (
                 201,
                 json!({
                     "token": t.token,
                     "label": t.label,
                     "created_at": t.created_at,
+                    "validity_seconds": t.validity_seconds,
+                    "expires_unix": t.expires_unix,
                     "file_text": key_file_text(&t),
                 }),
             ),
@@ -827,6 +846,44 @@ impl CuratomKernel {
             return (503, json!({ "error": "kernel_not_ready" }));
         };
         match k.revoke_key(token).await {
+            Ok(()) => (200, json!({ "ok": true })),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_reroll_key(&self, hr: &HttpRequestDto, token: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.reroll_key(token).await {
+            Ok(t) => (
+                200,
+                json!({
+                    "token": t.token,
+                    "label": t.label,
+                    "created_at": t.created_at,
+                    "validity_seconds": t.validity_seconds,
+                    "expires_unix": t.expires_unix,
+                    "file_text": key_file_text(&t),
+                }),
+            ),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_delete_key(&self, hr: &HttpRequestDto, token: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.delete_key(token).await {
             Ok(()) => (200, json!({ "ok": true })),
             Err(e) => (400, json!({ "error": e })),
         }
@@ -2649,7 +2706,7 @@ async fn post_signed(fetcher: &Fetcher, raw: &str, key: &[u8]) -> Result<(u16, S
     Ok((status, body))
 }
 
-async fn verify_turnstile(
+pub(crate) async fn verify_turnstile(
     secret: &str,
     token: &str,
     remote_ip: Option<&str>,

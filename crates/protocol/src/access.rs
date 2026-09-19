@@ -33,6 +33,18 @@ pub struct OrganicToken {
     /// this field existed still loads; it reads as empty, not missing.
     #[serde(default)]
     pub workspace_id: String,
+    /// How long this key was minted to live, or `None` for "no expiry."
+    /// Stored explicitly (not derived) so a reroll can mint the new key
+    /// with the same lifetime as the key it replaces -- deriving it from
+    /// `expires_unix - created_at` would slowly drift on every reroll.
+    #[serde(default)]
+    pub validity_seconds: Option<u64>,
+    /// `0` = never expires. Otherwise a unix-seconds deadline compared as
+    /// an integer by `Kernel::token_matches`, the same discipline as
+    /// `CapabilitySecret::expires_unix` -- never parse a date to decide
+    /// whether a credential is live.
+    #[serde(default)]
+    pub expires_unix: i64,
 }
 
 /// A named point in a key's own history -- "what state was I working
