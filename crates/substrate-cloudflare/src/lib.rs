@@ -55,6 +55,25 @@ struct MetaBlob {
     owner: Option<curatom_protocol::OwnerRecord>,
 }
 
+/// `whitepaper` is the one `KernelState` field that is a bare
+/// `Option<String>` with nothing else beside it. Found the hard way,
+/// against real production data on 19 Sep 2026: `serde_wasm_bindgen`
+/// serializes a top-level `Option::None` to JS `undefined`, not `null`,
+/// and Cloudflare's real Durable Object storage throws
+/// `TypeError: put() called with undefined value` on that -- while
+/// Miniflare's local emulation (used to verify this migration before
+/// deploy) tolerated it silently. `owner: Option<OwnerRecord>` above
+/// never hit this because it is a *field inside* `MetaBlob`, not the
+/// top-level value handed to `storage.put`; nested `None` serializes to
+/// `null` as expected. This wrapper gives `whitepaper` the same shape,
+/// so the value `storage.put` ever sees is always an object, never a
+/// bare `Option`.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct WhitepaperBlob {
+    #[serde(default)]
+    text: Option<String>,
+}
+
 pub struct DOStateStore {
     storage: Mutex<worker::durable::Storage>,
 }
@@ -190,8 +209,8 @@ impl StateStore for DOStateStore {
             {
                 state.checkpoints = v;
             }
-            if let Ok(Some(w)) = storage.get::<Option<String>>(KEY_WHITEPAPER).await {
-                state.whitepaper = w;
+            if let Ok(Some(w)) = storage.get::<WhitepaperBlob>(KEY_WHITEPAPER).await {
+                state.whitepaper = w.text;
             }
 
             // Best-effort cleanup of an orphaned legacy blob: the crash
@@ -267,7 +286,7 @@ impl StateStore for DOStateStore {
                 .await
                 .map_err(|e| e.to_string())?;
             storage
-                .put(KEY_WHITEPAPER, &legacy.whitepaper)
+                .put(KEY_WHITEPAPER, &WhitepaperBlob { text: legacy.whitepaper.clone() })
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -384,7 +403,7 @@ impl StateStore for DOStateStore {
         }
         if dirty.contains(DirtyKinds::WHITEPAPER) {
             storage
-                .put(KEY_WHITEPAPER, &state.whitepaper)
+                .put(KEY_WHITEPAPER, &WhitepaperBlob { text: state.whitepaper.clone() })
                 .await
                 .map_err(|e| e.to_string())?;
         }
