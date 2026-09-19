@@ -102,6 +102,25 @@ impl Scratchpad {
         }
     }
 
+    /// Read-only peek. Returns `None` for a key that has never written.
+    /// The difference from `load_or_init` is the whole reason this
+    /// exists: reading must not create. The dashboard's sketchpad view
+    /// calls `handle_notes`, and a `load_or_init` there reserved a
+    /// session for a machine that had not yet written anything, on
+    /// behalf of an operator who was only looking. The session was
+    /// harmless (empty, and reused by the machine on its first real
+    /// write), but "the reader creates state" is the kind of thing that
+    /// surprises someone auditing a read-only endpoint at exactly the
+    /// wrong moment.
+    #[allow(unused_variables)]
+    async fn load_only(&self, key_hash: &str) -> Result<Option<ScratchState>> {
+        let st = self.state.storage();
+        match st.get::<ScratchState>("current").await {
+            Ok(Some(s)) => Ok(Some(s)),
+            _ => Ok(None),
+        }
+    }
+
     async fn save(&self, s: &ScratchState) -> Result<()> {
         self.state.storage().put("current", s).await
     }
@@ -158,13 +177,28 @@ impl Scratchpad {
     }
 
     async fn handle_notes(&self, key_hash: &str) -> Result<Response> {
-        let s = self.load_or_init(key_hash, "").await?;
-        Response::from_json(&serde_json::json!({
-            "session_id": s.session_id,
-            "round": s.round,
-            "opened_at": s.opened_at,
-            "notes": s.notes,
-        }))
+        // Read-only. A key that has never written anything returns a
+        // synthetic empty shape that deserializes into the dashboard's
+        // `ScratchpadNotes` identically to a real empty session -- so
+        // the plate renders "No notes in this session" without a code
+        // path on the client side for "the key exists but has no pad."
+        // Same JSON shape as a real empty session; only the field
+        // values say it is synthetic, and only a caller who reads the
+        // documentation would notice.
+        match self.load_only(key_hash).await? {
+            Some(s) => Response::from_json(&serde_json::json!({
+                "session_id": s.session_id,
+                "round": s.round,
+                "opened_at": s.opened_at,
+                "notes": s.notes,
+            })),
+            None => Response::from_json(&serde_json::json!({
+                "session_id": "",
+                "round": 0,
+                "opened_at": "",
+                "notes": [],
+            })),
+        }
     }
 
     async fn handle_close(&self, key_hash: &str) -> Result<Response> {

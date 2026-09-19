@@ -112,6 +112,16 @@ where
         self.state.as_ref().ok_or_else(|| "kernel not loaded".into())
     }
 
+    /// The whole current `KernelState`, by reference. Exists for exactly
+    /// one caller -- `h_admin_export` in the Worker, which serializes it
+    /// to JSON for owner-initiated backup. Every other read path in this
+    /// crate goes through a narrower accessor (`list_keys`, `activity`,
+    /// `get_whitepaper`, ...), and the reader should keep it that way.
+    /// This is deliberately the only method that hands out everything.
+    pub fn export_state(&self) -> Result<&KernelState, String> {
+        self.st()
+    }
+
     fn st_mut(&mut self) -> Result<&mut KernelState, String> {
         self.state.as_mut().ok_or_else(|| "kernel not loaded".into())
     }

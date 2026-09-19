@@ -28,3 +28,4 @@ workers/orchestrator/node_modules/
 # Seam runtime
 scripts/.seam/
 workers/valhalla/node_modules/
+backups/

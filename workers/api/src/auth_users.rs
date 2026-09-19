@@ -805,3 +805,105 @@ pub async fn handle_password_reset_confirm(mut req: Request, env: &Env) -> Resul
 
     create_session_cookie(env, &row.user_id, json!({ "ok": true })).await
 }
+
+#[derive(Deserialize)]
+struct DeleteAccountBody {
+    /// Typed by the person, exactly. Guards against an accidental call:
+    /// `"DELETE"` is one keystroke from every other destructive word
+    /// and there is no confirm step on the client for an API this
+    /// sharp. Case-sensitive on purpose.
+    #[serde(default)]
+    confirm: String,
+}
+
+/// Hard delete. Requires an authenticated session and the confirm word.
+///
+/// Erased: the `users` row, every `user_sessions` row, every
+/// `user_passkeys` row, every `pending_verifications` row for this
+/// email, and every `password_resets` row for this user.
+///
+/// Preserved: the `ledger` table (key_hash, session_id, kind,
+/// body_ref, timestamps -- no PII), R2 objects behind those refs, and
+/// the DO's own KernelState. The DO is not cleared because it holds
+/// the account's tokens, knocks, connectors, repositories, and
+/// checkpoints, and clearing it on the way out would destroy the
+/// operator's own audit trail of what happened under their keys. A
+/// follow-up part should decide whether a deleted account's DO should
+/// be wiped on a delay (30 days is a common pattern) rather than
+/// immediately; this handler does not guess.
+///
+/// The response is not a redirect to a login page. The caller's session
+/// cookie was already invalidated by the `DELETE FROM user_sessions`
+/// below, and the client (which will not exist for a while, this is an
+/// API-first endpoint) is expected to clear its own cookie.
+pub async fn handle_delete_account(mut req: Request, env: &Env) -> Result<Response> {
+    let Some((user_id, _)) = resolve_user_session(&req, env).await? else {
+        return json_response(401, json!({ "error": "unauthenticated" }));
+    };
+    let Some(body) = read_json::<DeleteAccountBody>(&mut req).await else {
+        return json_response(400, json!({ "error": "malformed_body" }));
+    };
+    if body.confirm != "DELETE" {
+        return json_response(400, json!({
+            "error": "confirmation_required",
+            "detail": "send {\"confirm\":\"DELETE\"} to proceed",
+        }));
+    }
+
+    let db = env.d1("CURATOM_LEDGER")?;
+
+    // Email is needed for the pending_verifications sweep -- that table
+    // is keyed by email, not user_id, because the row predates the user.
+    #[derive(Deserialize)]
+    struct EmailRow {
+        email: String,
+    }
+    let email_row: Option<EmailRow> = db
+        .prepare("SELECT email FROM users WHERE id = ?1 LIMIT 1")
+        .bind(&[user_id.clone().into()])?
+        .first(None)
+        .await?;
+    let Some(email_row) = email_row else {
+        // The session was valid but the user row is already gone --
+        // a double-submit of this exact endpoint, or a session that
+        // outlived a deletion that happened some other way. Same
+        // answer either way: nothing to do.
+        return json_response(200, json!({ "ok": true, "already_deleted": true }));
+    };
+
+    // Ordering: children before parent. Each statement is a single D1
+    // write and the whole block is not a transaction -- D1 serializes
+    // single-database writes, so no other request can interleave, but
+    // a crash between two statements leaves the account partially
+    // deleted. The endpoint is idempotent (the second call finds no
+    // `users` row and returns `already_deleted`), so a partial run
+    // completes on retry.
+    db.prepare("DELETE FROM user_sessions WHERE user_id = ?1")
+        .bind(&[user_id.clone().into()])?
+        .run()
+        .await?;
+    db.prepare("DELETE FROM user_passkeys WHERE user_id = ?1")
+        .bind(&[user_id.clone().into()])?
+        .run()
+        .await?;
+    db.prepare("DELETE FROM password_resets WHERE user_id = ?1")
+        .bind(&[user_id.clone().into()])?
+        .run()
+        .await?;
+    db.prepare("DELETE FROM pending_verifications WHERE email = ?1")
+        .bind(&[email_row.email.into()])?
+        .run()
+        .await?;
+    db.prepare("DELETE FROM users WHERE id = ?1")
+        .bind(&[user_id.into()])?
+        .run()
+        .await?;
+
+    // Explicitly do NOT clear the session cookie here. The row it
+    // refers to no longer exists, so the cookie is inert -- every
+    // subsequent request will fail `resolve_user_session` and be
+    // treated as anonymous. Setting a `Set-Cookie` with `Max-Age=0`
+    // would be tidier but is not load-bearing, and leaving it out
+    // keeps this handler free of response-header surgery.
+    json_response(200, json!({ "ok": true }))
+}

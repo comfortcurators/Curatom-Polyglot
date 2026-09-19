@@ -91,6 +91,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.path() == "/auth/password/reset/confirm" && req.method() == Method::Post {
         return auth_users::handle_password_reset_confirm(req, &env).await;
     }
+    if req.path() == "/auth/account/delete" && req.method() == Method::Post {
+        return auth_users::handle_delete_account(req, &env).await;
+    }
     // Passkeys. Registering one requires an existing session (you add a
     // passkey to an account you're already in); logging in with one does
     // not, since the whole point is arriving with no password.
@@ -462,6 +465,7 @@ impl DurableObject for CuratomKernel {
             }
             ("GET", "/organic/whitepaper") => self.h_get_whitepaper(&hr).await,
             ("PUT", "/organic/whitepaper") => self.h_set_whitepaper(&hr).await,
+            ("GET", "/organic/admin/export") => self.h_admin_export(&hr).await,
             ("GET", "/organic/valhalla/sessions") => self.h_valhalla_sessions(&hr).await,
             ("GET", "/organic/knocks") => self.h_list_knocks(&hr).await,
             ("POST", p) if p.starts_with("/organic/knocks/") && p.ends_with("/approve") => {
@@ -487,7 +491,6 @@ impl DurableObject for CuratomKernel {
             ("POST", "/inorganic/submit") => self.h_inorganic_submit(&hr).await,
             ("POST", "/internal/outcome") => self.h_internal_outcome(&hr).await,
             ("POST", "/internal/freeze") => self.h_internal_freeze(&hr).await,
-            ("POST", "/internal/release") => self.h_internal_release(&hr).await,
             ("POST", "/internal/release-session") => self.h_internal_release_session(&hr).await,
             ("POST", "/internal/authorize-provision") => {
                 self.h_internal_authorize_provision(&hr).await
@@ -1013,6 +1016,32 @@ impl CuratomKernel {
             return (503, json!({ "error": "kernel_not_ready" }));
         };
         (200, json!({ "whitepaper": k.get_whitepaper() }))
+    }
+
+    /// Owner-only dump of the DO's whole `KernelState`. The one route
+    /// that returns live credentials (`tokens`, and any unconsumed
+    /// `grants`) in the response body, which is why it is gated by
+    /// `owner()` like every other `/organic/*` route. Purpose: give the
+    /// operator a way to back up their own account's state before any
+    /// change that touches the DO's storage format -- the 5b migration
+    /// deleted the only copy of the legacy blob on success, and there
+    /// was no way back from a bad migration except the bug fix itself.
+    /// See `scripts/backup_state.sh` for the caller.
+    async fn h_admin_export(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.export_state() {
+            Ok(state) => match serde_json::to_value(state) {
+                Ok(v) => (200, v),
+                Err(e) => (500, json!({ "error": format!("serialize: {e}") })),
+            },
+            Err(e) => (500, json!({ "error": e })),
+        }
     }
 
     async fn h_set_whitepaper(&self, hr: &HttpRequestDto) -> Reply {
@@ -2053,36 +2082,6 @@ impl CuratomKernel {
         }
     }
 
-    async fn h_internal_release(&self, hr: &HttpRequestDto) -> Reply {
-        if !self.hmac_ok(hr) {
-            return (
-                401,
-                json!({ "error": if hr.header("x-curatom-hmac").is_none() { "missing hmac" } else { "bad hmac" } }),
-            );
-        }
-        let url = match Url::parse(&hr.url) {
-            Ok(u) => u,
-            Err(_) => return (400, json!({ "error": "bad_url" })),
-        };
-        let params: HashMap<String, String> = url
-            .query_pairs()
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        let Some(freeze_id) = params.get("freeze_id").cloned() else {
-            return (400, json!({ "error": "missing_freeze_id" }));
-        };
-        let parity_ok = params.get("parity_ok").map(|v| v == "true").unwrap_or(false);
-        let reason = params.get("reason").cloned().unwrap_or_default();
-        let mut k = self.kernel.borrow_mut();
-        let Some(k) = k.as_mut() else {
-            return (503, json!({ "error": "kernel_not_ready" }));
-        };
-        match k.release_freeze(&freeze_id, parity_ok, reason).await {
-            Ok(f) => (200, json!({ "freeze_id": f.id, "released_at": f.released_at })),
-            Err(e) => (400, json!({ "error": e })),
-        }
-    }
-
     async fn h_internal_release_session(&self, hr: &HttpRequestDto) -> Reply {
         if !self.hmac_ok(hr) {
             return (
@@ -2665,6 +2664,7 @@ async fn github_get(url: &str, auth_header: Option<&str>) -> std::result::Result
 /// behaviour this whole split is layered on top of.
 fn locally_dispatchable(resource: &str) -> bool {
     resource == curatom_resource_registry::COMPANY_WHITEPAPER
+        || resource == curatom_resource_registry::COMPANY_INVENTORY
         || resource == curatom_resource_registry::REPOSITORY_INVENTORY
         || (resource.starts_with("repository.")
             && resource != curatom_resource_registry::REPOSITORY_INVENTORY)
@@ -2680,6 +2680,57 @@ async fn execute_locally(
     resource: &str,
     op: Permission,
 ) -> (bool, Option<Value>, Option<String>) {
+    // `company.inventory` -- what this account actually holds. Not a
+    // list of "internal assets" in the abstract (the account has no
+    // such concept, and pretending it does would be a lie in the
+    // response body); it is a list of the things this owner has
+    // already created through the dashboard, which is a name-only
+    // inventory of everything a machine could reasonably want to
+    // ask about. Token values are excluded on purpose -- a knock is
+    // not a place a token should ever appear, and `assert_organic_safe`
+    // would reject one that did.
+    if resource == curatom_resource_registry::COMPANY_INVENTORY {
+        let keys: Vec<Value> = k
+            .list_keys()
+            .into_iter()
+            .map(|t| json!({
+                "label": t.label,
+                "workspace_id": t.workspace_id,
+                "created_at": t.created_at,
+                "has_expiry": t.expires_unix != 0,
+            }))
+            .collect();
+        let connectors: Vec<Value> = k
+            .list_connectors()
+            .into_iter()
+            .map(|c| json!({ "name": c.name, "endpoint": c.endpoint }))
+            .collect();
+        let repositories: Vec<Value> = k
+            .list_repositories()
+            .into_iter()
+            .map(|r| json!({
+                "name": r.name,
+                "last_synced_at": r.last_synced_at,
+                "last_sync_file_count": r.last_sync_file_count,
+            }))
+            .collect();
+        let checkpoint_count: usize = k
+            .list_keys()
+            .iter()
+            .map(|t| k.list_checkpoints(&t.token).len())
+            .sum();
+        return (
+            true,
+            Some(json!({
+                "keys": keys,
+                "connectors": connectors,
+                "repositories": repositories,
+                "checkpoint_count": checkpoint_count,
+                "has_whitepaper": k.get_whitepaper().is_some(),
+            })),
+            None,
+        );
+    }
     if resource == curatom_resource_registry::COMPANY_WHITEPAPER {
         return match op {
             Permission::Read => match k.get_whitepaper() {
