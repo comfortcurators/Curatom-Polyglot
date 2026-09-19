@@ -37,6 +37,7 @@ fn main() {
         "approval_id": "appr_seam",
         "intent_id": "int_seam",
         "requester_id": "fleet.curatom",
+        "owner_id": "org_test_seam",
         "actions": [{
             "resource": "hostos.inventory",
             "operation": "read",
