@@ -218,6 +218,35 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let id = ns.id_from_name(&owner_key)?;
         return id.get_stub()?.fetch_with_request(rebuilt).await;
     }
+    // The sketchpad surface -- every `/scratch/*` operation -- carries a
+    // machine token and no session cookie, by design: the LLM guide
+    // documents these as the machine's own endpoints. Before this block
+    // existed, they fell through to the generic session-or-default
+    // routing below and landed on the founder's singleton DO regardless
+    // of whose token was presented, which returned `token_not_recognized`
+    // for every non-founder key. The same trap as `/inorganic/knock`,
+    // `/organic/keys/verify`, `/internal/authorize-provision`, and the
+    // `/internal/freeze` / `/internal/release-session` pair -- each of
+    // which got this same fix earlier, each time with a comment saying
+    // so. The five are all the routes that authenticate by bearer token
+    // without a session; if a sixth is ever added, it needs the same
+    // treatment. Token validity is still checked in the DO's own
+    // `route_scratch` against that DO's own kernel -- this block only
+    // decides *which* DO gets asked, never whether the token is good.
+    if req.path().starts_with("/scratch/") && req.method() == Method::Get {
+        let url = req.url()?;
+        let token = url
+            .query_pairs()
+            .find(|(k, _)| k == "token")
+            .map(|(_, v)| v.into_owned());
+        let owner_key = token
+            .as_deref()
+            .and_then(owner_key_from_token)
+            .unwrap_or(env.var("CURATOM_OWNER_ID")?.to_string());
+        let ns = env.durable_object("CURATOM_KERNEL")?;
+        let id = ns.id_from_name(&owner_key)?;
+        return id.get_stub()?.fetch_with_request(req).await;
+    }
 
     // Which CuratomKernel instance this request reaches. A verified
     // account's session routes to its own instance, named by its own
