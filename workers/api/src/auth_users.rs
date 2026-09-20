@@ -11,7 +11,7 @@ prefetch every URL in an inbound email before a human ever clicks it,
 which is itself a GET -- so the scanner won the race, the account was
 minted with a password nobody but the scanner ever saw, and the actual
 person got "unknown_or_used_token" on a link already burned out from
-under them. Confirmed live: `yashrajvansh@hotmail.com` hit exactly this
+under them. Confirmed live against a dedicated test mailbox: this exact failure occurred
 on first registration.
 
 The fix removes the secret from that path rather than trying to referee

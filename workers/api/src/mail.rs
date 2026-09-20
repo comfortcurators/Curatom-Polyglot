@@ -32,7 +32,7 @@ pub enum MailError {
 /// cannot go out, not silently mint an account nobody can verify.
 pub async fn send_verification_email(env: &Env, to: &str, verify_url: &str) -> std::result::Result<(), MailError> {
     let html = format!(
-        "<p>Confirm this address to finish registering at Curatom Enterprise.</p>\
+        "<p>Confirm this address to finish registering at Curatom Polyglot.</p>\
          <p><a href=\"{verify_url}\">{verify_url}</a></p>\
          <p>This link expires in 30 minutes. If you didn't request this, ignore it.</p>"
     );

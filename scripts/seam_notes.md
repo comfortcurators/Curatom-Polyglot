@@ -15,10 +15,13 @@ It does **not** loop the kernel in-process. It:
 6. Restarts the orchestrator. ETS is empty, so the same nonce runs again.
    That is the deferred persistent-replay hole, **observed**, not faked green.
 
-The Cloudflare Worker process itself is not in this loop. wasm `cargo check`
-is green; wrangler deploy is still deferred. This seam proves the bytes
-that cross the Worker↔Elixir boundary, using the same crates the Worker
-calls.
+The Cloudflare Worker process itself is not in this loop. This seam proves the
+bytes that cross the Worker↔Elixir boundary using the same attestation code the
+Worker calls; it does **not** prove the complete deployed Worker → container →
+orchestrator → outcome path. That production composition remains a separate
+manual release probe in `RELEASE.md`/`DEFERRED.md`. Re-run
+`./scripts/release-check.sh` against the exact release commit rather than
+relying on an older successful WASM check.
 
 ```bash
 export PATH="$PATH"   # mix + erl on PATH

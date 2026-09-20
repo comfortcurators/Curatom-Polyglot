@@ -12,17 +12,19 @@ You do not have standing access. You ask each time. The operator has 88 seconds.
 
 | Resource | What it holds | Best use |
 |---|---|---|
-| `hostos.inventory` | Count and status of services running under HostOS | "Is HostOS healthy?" |
-| `hostos.metadata` | Version, region, deployment tag of HostOS | "What version is running?" |
-| `cloudflare.inventory` | Count of Workers, R2 buckets, D1 databases in the account | "What's deployed on Cloudflare?" |
-| `company.whitepaper` | Public company description | Reading background |
-| `company.inventory` | Named internal assets | Enumerating what exists |
-| `repository.inventory` | List of git repositories | Enumerating repos |
+| `hostos.inventory` | External HostOS inventory target; the canonical rv0.4.0 adapter is a mock | Testing the remote-execution contract |
+| `hostos.metadata` | External HostOS metadata target; the canonical rv0.4.0 adapter is a mock | Testing the remote-execution contract |
+| `cloudflare.inventory` | External Cloudflare inventory target; the canonical rv0.4.0 adapter is a mock | Testing the remote-execution contract |
+| `company.whitepaper` | Operator-maintained company context | Reading background |
+| `company.inventory` | Account-scoped Curatom inventory: key labels, connectors, repositories, checkpoint count, whitepaper presence | Enumerating what this Curatom account contains |
+| `repository.inventory` | Repositories registered or uploaded into Curatom | Enumerating repositories |
 
 ## Operations
 
-- `read` — you receive the value. Non-destructive. Allowed on all resources above.
-- `write` — modify. **Not yet enabled on any resource.** Do not request it.
+- `read` — you receive the value. This is the normal operation for the static resources above.
+- `write` — exists in the protocol, but a knock carries no write payload. Built-in resources therefore do not accept an arbitrary mutation through a knock. User-defined `compute.<connector_id>` resources may accept `write`, but rv0.4.0 calls the configured connector endpoint the same way as `read`; it does not send a separate mutation body.
+
+The handoff form is authoritative for this key. It may also list dynamic resources such as `repository.<id>` and `compute.<connector_id>` that cannot be enumerated in this static guide.
 
 ## What the "name" field means
 
@@ -121,8 +123,9 @@ Available operations (all GET, all query-param):
   GET /valhalla/SANDBOX_ID/close?report=YOUR_FINAL_REPORT
 
 Write your intent and pattern to the scratchpad before and after.
-The Valhalla receipt is written on close. Nothing inside is preserved
-except your report and the action log.
+The Valhalla receipt is written on close. The sandbox itself is disposable.
+Workspace files survive only if an explicit checkpoint snapshot was taken
+before close; snapshot manifests and content-addressed blobs live in R2.
 
 ## The freeze law
 
@@ -155,5 +158,4 @@ resources you were testing against. That is the point.
 If you cannot produce a digest — if your Valhalla result does not match
 what you expect live to be — do not close. Write the discrepancy to your
 scratchpad as a pattern. Ask the operator.
-
 

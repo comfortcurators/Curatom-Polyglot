@@ -201,7 +201,7 @@ fn PasskeysCard() -> impl IntoView {
                 let reg = passkey_browser::create_passkey(
                     &challenge.challenge,
                     &challenge.rp_id,
-                    "Curatom Enterprise",
+                    "Curatom Polyglot",
                     &challenge.user_id,
                     &challenge.username,
                 )

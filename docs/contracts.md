@@ -1,89 +1,41 @@
 # The three contracts
 
-## Contract 1 — Expo ↔ Worker
+## Contract 1 — operator or machine ↔ Worker
 
-HTTPS JSON. All organic routes require `Cf-Access-Jwt-Assertion`.
+HTTPS/JSON is the public application boundary.
 
-In development, the Worker accepts `x-curatom-dev-organic` as a stand-in
-for Cloudflare Access. That header is not a production identity.
+Operator routes use an authenticated owner context: account sessions are the normal path, Cloudflare Access JWT verification is supported when `TEAM_DOMAIN` and `POLICY_AUD` are configured, and a deployment break-glass credential exists separately. Development-only identity shortcuts are gated by development configuration.
 
-Responses never include:
+Machine routes use an operator-issued Curatom key. The key identifies the owner and machine-facing state and lets the machine request authority; it does not approve its own request.
 
-- `token`
-- `grt_` prefixes
-- `cap_` prefixes
-- OAuth scopes
-- MCP schemas
-- Cloudflare binding syntax
+A useful precision for publishing: **operator key-management routes may return the machine key token**, because the operator has to hand that credential to a machine. What the browser-facing surface must not expose is a reusable capability/grant secret, the HMAC signing secret, connector header values, or Cloudflare binding internals. Do not summarize Contract 1 as “no token ever reaches the browser.”
 
-The owner sees intents, approvals, activity, and outcomes in human language.
+The operator sees knocks, key lifecycle, activity and outcomes in the dashboard. Machine-facing routes receive only the information required for their own flow.
 
-## Contract 2 — Worker ↔ Elixir
+## Contract 2 — Worker ↔ Elixir orchestrator
 
-One POST. HMAC-signed. Contains an attestation per authorized action.
+One signed job POST per handoff. The Cloudflare Worker consumes capability authority **before** remote execution and then sends the orchestrator signed evidence of the authorized action.
 
-Elixir never sees the underlying grant; it sees a signed proof that this
-specific operation on this specific resource by this specific requester was
-authorized, single-use.
+The transport body is authenticated with HMAC-SHA256 in `x-curatom-hmac`. Each action also carries an HMAC-signed attestation containing the job/grant/requester/resource/operation, issuance and expiry timestamps, and a nonce. `CURATOM_HMAC_KEY` is the shared secret in rv0.4.0; both sides use the same key-decoding rules.
 
-- Endpoint: `POST {CURATOM_ORCHESTRATOR_URL}` (default `/v1/jobs`)
-- Header: `x-curatom-hmac: hex(HMAC-SHA256(raw_body, key))`
-- Body:
+The important property is negative: Elixir does **not** receive the live capability secret that the kernel consumed. Compromise of the orchestrator therefore does not by itself provide a reusable Curatom grant.
 
-```json
-{
-  "job_id": "job_…",
-  "approval_id": "appr_…",
-  "intent_id": "int_…",
-  "requester_id": "fleet.curatom",
-  "actions": [
-    {
-      "resource": "hostos.inventory",
-      "operation": "read",
-      "attestation": "<urlsafe-b64(claims)>.<urlsafe-b64(hmac)>"
-    }
-  ]
-}
-```
+The complete wire shape is defined by `workers/api/src/lib.rs`, `crates/attestation/`, and `orchestrator/lib/curatom_orchestrator/` in the release commit. Those files, rather than examples in prose, are authoritative when exact field names matter.
 
-Attestation claims:
+## Contract 3 — orchestrator ↔ execution adapter, then outcome ↔ Worker
 
-```json
-{
-  "v": 1,
-  "job_id": "job_…",
-  "grant_id": "grt_…",
-  "requester_id": "fleet.curatom",
-  "resource": "hostos.inventory",
-  "operation": "read",
-  "issued_unix": 0,
-  "expires_unix": 0,
-  "nonce": "nonce_…"
-}
-```
+In rv0.4.0, Elixir verifies the action attestation and its expiry/replay state **before** invoking an execution adapter. The shipped HostOS adapter implementation is a mock. The adapter receives the already-verified action fields; this release does not ship a real HostOS target that independently receives and verifies the raw Curatom attestation.
 
-HMAC key: `CURATOM_HMAC_KEY`. Both sides first try standard-base64 decode,
-then fall back to the raw UTF-8 bytes of the secret. Do not mix encodings.
+That distinction matters: public writing must not claim that a real HostOS deployment currently verifies Curatom attestations. Real HostOS execution is explicitly deferred in `DEFERRED.md`.
 
-The Worker **pre-consumes** the capability in the kernel before this POST.
-Elixir is handed a spent grant's attestation, not a live token.
+After execution, Elixir sends the outcome back to the Worker over the internal callback. The callback body is HMAC-authenticated, carries the owner identifier used for routing, and is checked against the receiving owner's Durable Object before the outcome is recorded.
 
-## Contract 3 — Elixir ↔ HostOS
+## HMAC envelope in rv0.4.0
 
-Elixir presents the attestation to HostOS. HostOS validates against the
-Worker's HMAC secret (v0) or public key (Ed25519, deferred) and against a
-replay guard.
+- MAC: HMAC-SHA256.
+- Job/callback body MAC: hex digest in `x-curatom-hmac`.
+- Action attestation: URL-safe-base64 payload plus URL-safe-base64 signature.
+- Signature comparisons are constant-time where authentication material is compared.
+- Replay protection in Elixir is process-local in rv0.4.0; persistence across BEAM restarts is deferred.
 
-HostOS does not call back to the Worker to consume the grant — the Worker
-pre-consumed it before handing off. Consumption is a kernel decision, made
-once, before the orchestrator is trusted with the action.
-
-Outcomes flow the other way: Elixir POSTs `/internal/outcome` to the Worker,
-HMAC-signed the same way as Contract 2. No token, no scope.
-
-## HMAC envelope (v0)
-
-- MAC: HMAC-SHA256
-- Job body MAC: hex digest, header `x-curatom-hmac`
-- Attestation MAC: URL-safe base64, no padding, `payload.sig`
-- Compare signatures in constant time
+The HMAC design is deliberately version-bounded. Asymmetric attestations and stronger persistent replay protection are listed in `DEFERRED.md` rather than implied complete here.

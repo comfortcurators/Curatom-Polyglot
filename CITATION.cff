@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use Curatom Polyglot, please cite the rv0.4.0 release. Earlier Curatom artifacts are separate records in the same project lineage."
+title: "Curatom Polyglot"
+type: software
+version: "rv0.4.0"
+date-released: 2026-09-20
+doi: "10.5281/zenodo.22855407"
+authors:
+  - family-names: "Rajvansh"
+    given-names: "Yash"
+    affiliation: "COMFORT CURATORS PRIVATE LIMITED"
+    orcid: "https://orcid.org/0009-0003-1658-2682"
+repository-code: "https://github.com/comfortcurators/Curatom-Polyglot"
+url: "https://github.com/comfortcurators/Curatom-Polyglot"
+license: AGPL-3.0-only
+abstract: >-
+  Curatom Polyglot is open-source DeepTech software by Yash Rajvansh and
+  Comfort Curators Private Limited: owner-controlled capability infrastructure
+  for granting machines temporary, narrowly scoped authority, executing across
+  explicit trust boundaries, and recording outcomes without exposing the
+  operator's underlying credentials.
+keywords:
+  - Curatom
+  - Curatom Polyglot
+  - Yash Rajvansh
+  - Rajvansh
+  - Comfort Curators
+  - COMFORT CURATORS PRIVATE LIMITED
+  - DeepTech
+  - open source
+  - capability security
+  - machine authorization
+  - human-in-the-loop AI
+  - AI agents
+  - Cloudflare Workers
+  - Rust
+  - WebAssembly
+  - Elixir

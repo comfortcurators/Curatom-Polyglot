@@ -1,10 +1,10 @@
-Curatom-Polyglot
+Curatom Polyglot
 Copyright (C) 2026 Comfort Curators Private Limited
-Corporate Identity Number U47912HR2026PTC144195
 
-This product includes software developed by Comfort Curators Private Limited.
-Licensed under AGPL-3.0-only. See LICENSE.
+Curatom Polyglot is licensed under AGPL-3.0-only. See LICENSE.
+Third-party components retain their respective licenses; see THIRD_PARTY_NOTICES.md
+and the license files distributed with those components.
 
-Curatom, HostOS, SuperhostOS, and Comfort Curators are names of Comfort
-Curators Private Limited. Cloudflare, Expo, Elixir, OTP, and Rust are
-trademarks of their respective owners.
+Curatom, Curatom Polyglot, HostOS, SuperhostOS, Valhalla, and Comfort Curators
+are project, product, or company names used by Comfort Curators Private Limited.
+Third-party names and trademarks belong to their respective owners.

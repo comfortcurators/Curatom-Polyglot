@@ -216,7 +216,14 @@ export default {
       try {
         const sandbox = getSandbox(env.Sandbox, sandboxId);
         const raw = await sandbox.readFile(filePath);
-        const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+        // Cloudflare Sandbox may return either a string or a result object
+        // containing `content`; normalize both shapes without serializing the
+        // SDK wrapper itself into the file body.
+        const text = raw && typeof raw === "object" && "content" in raw
+          ? String((raw as { content: unknown }).content ?? "")
+          : typeof raw === "string"
+            ? raw
+            : JSON.stringify(raw);
         await appendLog(env, sandboxId, "read", filePath, `${text.length} bytes`);
         return jsonOk({ path: filePath, body: text });
       } catch (e) {
@@ -563,16 +570,12 @@ async function snapshotWorkspace(
       const read = await sandbox.readFile(filePath);
       // The SDK's `readFile` returns a result object
       // (`{success, path, content, ...}`), not a raw string -- unlike
-      // what the `typeof read === "string"` shape elsewhere in this
-      // file assumes. Verified against the local sandbox container's
-      // real output (Phase 4 verification, 19 Sep 2026): serializing
-      // the whole object instead of extracting `.content` silently
-      // wrote the wrapper's metadata into every snapshot blob rather
-      // than the file's actual bytes. The `/read` endpoint above has
-      // the same `typeof`-guard shape and is very likely wrong the
-      // same way; not fixed here -- it predates this change and fixing
-      // it is a decision for whoever owns that endpoint's callers, not
-      // a side effect of this one.
+      // what an earlier `typeof read === "string"` assumption expected.
+      // Verified against the local sandbox container's real output
+      // (Phase 4 verification, 19 Sep 2026): serializing the whole object
+      // instead of extracting `.content` silently wrote wrapper metadata
+      // into every snapshot blob rather than the file's actual bytes. The
+      // public `/read` endpoint uses the same normalization in rv0.4.0.
       if (read && typeof read === "object" && "content" in read) {
         content = String((read as { content: unknown }).content ?? "");
       } else {

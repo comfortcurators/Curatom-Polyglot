@@ -1,8 +1,27 @@
 # Changelog
 
-Reverse-chronological. Grouped by session. Not a substitute for `git log`
-or `DEFERRED.md` -- this is what a person would want to know without
-reading either.
+Reverse-chronological. This records release-level changes; `git log` remains the detailed provenance.
+
+## rv0.4.0 — 20 Sep 2026
+
+**Archive:** Zenodo DOI `10.5281/zenodo.22855407`.
+
+**Publication hardening:**
+- Added consistent author/organization/discovery metadata for Yash Rajvansh, Rajvansh, Comfort Curators / COMFORT CURATORS PRIVATE LIMITED and DeepTech across README, CITATION.cff, CodeMeta and Zenodo copy.
+- Removed a live-test personal mailbox from a source comment before publication.
+- Reviewed the sole GitHub branch history (97 reachable commits) for high-confidence secret patterns; only the intentionally labelled test HMAC example was found.
+
+
+First archival open-source release of Curatom Polyglot.
+
+- Reframed the public documentation around the implemented capability/execution architecture rather than the original three-language prototype description.
+- Recorded the release lineage correctly: rv0.2.0 is the earlier Zenodo artifact, rv0.3.0 is the later Google Cloud All Things Agentic hackathon submission state in `comfortcurators/Curatom`, and Polyglot rv0.4.0 is a from-scratch implementation in a separate repository.
+- Added citation, security, contribution, architecture, publication-due-diligence and third-party-notice material; replaced the abbreviated license pointer with the complete GNU AGPLv3 text.
+- Unified first-party release metadata at `0.4.0` while using `rv0.4.0` as the public release/tag spelling.
+- Fixed owner routing for **all** `/scratch/*` machine requests. Earlier routing only forwarded GET requests by the presenting key's owner prefix, leaving `/scratch/write` and `/scratch/close` able to fall through to session/default-owner routing.
+- Fixed Valhalla `/read` for the current Cloudflare Sandbox SDK result shape by extracting `readFile(...).content` instead of serializing the SDK wrapper object.
+- Preserved the existing bearer-key machine path and legacy identity scaffolding rather than deleting code as part of publication cleanup.
+- Refreshed `DEFERRED.md` to describe only gaps that remain in this release: bearer-only machine identity, shared-HMAC trust, process-local replay protection, mock HostOS execution, URL-carried bearer/payload data, timeout/cancellation work, production Access configuration, distributed rate limiting, shared D1 tenancy and unfinished product surfaces.
 
 ## 19 Sep 2026 (session 2)
 
@@ -14,9 +33,9 @@ production incident.
   /organic/whitepaper` now reachable from the dashboard.
 - Part 7: Sketchpads viewer plate; new `SketchpadsPlate`, reads
   `/scratch/notes` and `/scratch/history` per key.
-- Part 7b: `/scratch/*` routing fixed -- requests carrying a non-founder
-  token no longer land on the founder's DO. Live for any non-founder key
-  for the first time.
+- Part 7b: read-side `/scratch/*` routing fixed for the dashboard's GET
+  paths. A later review found that write/close methods were still able to
+  fall through to default-owner routing; rv0.4.0 closes that remaining gap.
 - Part 8: `/internal/outcome` routing. The handoff envelope carries
   `owner_id`; the orchestrator echoes it; the Worker routes on it;
   `h_internal_outcome` refuses a mismatched owner. Non-founder remote
@@ -27,8 +46,9 @@ production incident.
   `Outcome::data` replaced with a truncation marker. Closes the 128 KiB
   DO storage value failure mode that was live-but-latent.
 - Part 9: `owner_key_or_default`, `rebuild_request`, and
-  `forward_to_owner_do` helpers; all seven owner-prefix routing call
-  sites rewritten in terms of them.
+  `forward_to_owner_do` helpers; the seven owner-prefix routing blocks known
+  in that pass were rewritten in terms of them. The later rv0.4.0 review
+  caught the method-specific scratch write/close omission.
 - `[observability] enabled = true`, 100% sampling.
 - `Login requires Turnstile` -- was register-only before.
 

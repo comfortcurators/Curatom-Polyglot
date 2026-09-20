@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-attestation"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "hmac",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-crypto"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-execution"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "curatom-protocol",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-inorganic-router"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "curatom-protocol",
  "curatom-resource-registry",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-key-kernel"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "curatom-crypto",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-organic-router"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "curatom-protocol",
  "serde",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-ports"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "curatom-protocol",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-protocol"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -207,18 +207,18 @@ dependencies = [
 
 [[package]]
 name = "curatom-resource-registry"
-version = "0.1.0"
+version = "0.4.0"
 
 [[package]]
 name = "curatom-sign"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
 ]
 
 [[package]]
 name = "curatom-substrate-memory"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "curatom-crypto",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "curatom-webauthn"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "ciborium",

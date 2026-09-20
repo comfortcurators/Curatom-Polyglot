@@ -1,0 +1,44 @@
+{
+  "title": "Curatom Polyglot rv0.4.0 — Owner-Controlled Capability Infrastructure for Machine Authorization",
+  "upload_type": "software",
+  "publication_date": "2026-09-20",
+  "version": "rv0.4.0",
+  "access_right": "open",
+  "license": "AGPL-3.0-only",
+  "language": "eng",
+  "description": "Curatom Polyglot rv0.4.0 is open-source DeepTech software by Yash Rajvansh and Comfort Curators Private Limited for owner-controlled machine authorization. Machines request narrowly scoped authority; operators approve or refuse it; authority is consumed before remote execution; and authenticated outcomes return to owner-scoped state. rv0.4.0 is a from-scratch implementation in the Curatom project lineage, not an in-place source upgrade of the earlier comfortcurators/Curatom codebase. The earlier repository remains the historical rv0.2.0 Zenodo artifact and later rv0.3.0 Google Cloud All Things Agentic hackathon submission state.",
+  "creators": [
+    {
+      "name": "Rajvansh, Yash",
+      "affiliation": "COMFORT CURATORS PRIVATE LIMITED (Comfort Curators)",
+      "orcid": "0009-0003-1658-2682"
+    }
+  ],
+  "keywords": [
+    "Curatom",
+    "Curatom Polyglot",
+    "Yash Rajvansh",
+    "Rajvansh",
+    "Comfort Curators",
+    "COMFORT CURATORS PRIVATE LIMITED",
+    "DeepTech",
+    "open source",
+    "capability security",
+    "machine authorization",
+    "human-in-the-loop AI",
+    "AI agents",
+    "agent security",
+    "Rust",
+    "WebAssembly",
+    "Elixir",
+    "Cloudflare Workers",
+    "Durable Objects"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.22112980",
+      "relation": "isRelatedTo",
+      "scheme": "doi"
+    }
+  ]
+}

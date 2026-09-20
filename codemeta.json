@@ -1,0 +1,72 @@
+{
+  "@context": "https://doi.org/10.5063/schema/codemeta-2.0",
+  "@type": "SoftwareSourceCode",
+  "name": "Curatom Polyglot",
+  "alternateName": [
+    "Curatom",
+    "Curatom rv0.4.0"
+  ],
+  "version": "rv0.4.0",
+  "datePublished": "2026-09-20",
+  "description": "Curatom Polyglot is open-source DeepTech software by Yash Rajvansh and Comfort Curators Private Limited: owner-controlled capability infrastructure for machine and AI access to company systems, built around explicit human approval, bounded authority, signed trust boundaries, and recorded outcomes.",
+  "codeRepository": "https://github.com/comfortcurators/Curatom-Polyglot",
+  "license": "https://spdx.org/licenses/AGPL-3.0-only.html",
+  "programmingLanguage": [
+    "Rust",
+    "Elixir",
+    "TypeScript",
+    "JavaScript"
+  ],
+  "keywords": [
+    "Curatom",
+    "Curatom Polyglot",
+    "Yash Rajvansh",
+    "Rajvansh",
+    "Comfort Curators",
+    "COMFORT CURATORS PRIVATE LIMITED",
+    "DeepTech",
+    "open source",
+    "capability security",
+    "machine authorization",
+    "human approval",
+    "machine authority",
+    "Rust",
+    "WebAssembly",
+    "Elixir",
+    "Cloudflare Workers"
+  ],
+  "author": [
+    {
+      "@type": "Person",
+      "givenName": "Yash",
+      "familyName": "Rajvansh",
+      "name": "Yash Rajvansh",
+      "affiliation": {
+        "@type": "Organization",
+        "name": "COMFORT CURATORS PRIVATE LIMITED",
+        "alternateName": "Comfort Curators"
+      },
+      "@id": "https://orcid.org/0009-0003-1658-2682",
+      "sameAs": [
+        "https://orcid.org/0009-0003-1658-2682",
+        "https://github.com/yashrajvansh",
+        "https://yashrajvansh.link/"
+      ]
+    }
+  ],
+  "copyrightHolder": {
+    "@type": "Organization",
+    "name": "COMFORT CURATORS PRIVATE LIMITED",
+    "alternateName": "Comfort Curators"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "Comfort Curators Private Limited",
+    "alternateName": [
+      "Comfort Curators",
+      "COMFORT CURATORS PRIVATE LIMITED"
+    ],
+    "url": "https://comfortcurator.com/"
+  },
+  "identifier": "https://doi.org/10.5281/zenodo.22855407"
+}

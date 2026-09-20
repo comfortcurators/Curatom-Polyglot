@@ -2,15 +2,11 @@ name = "curatom-kernel"
 main = "workers/api/build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
-# workers.dev enabled deliberately, 16 Sep 2026: the founder wants token-only
-# entry (RAJ_TOKEN, ?token= in a plain browser tab) without Cloudflare
-# Access's email/OTP flow in front of it. That's safe now specifically
-# because the Cf-Access-* header-trust branches this comment used to warn
-# about are gone from CloudflareAccessIdentityProvider::authenticate --
-# RAJ_TOKEN and CURATOM_ENV=development's dev header are the only two
-# paths in, and neither is a header Cloudflare happens to pass through
-# unmodified. Re-disabling this without also restoring real JWT
-# verification first would be the old vulnerability again.
+# workers.dev is enabled deliberately so the deployment can support the
+# application's own authenticated entry path as well as the custom domain.
+# Cloudflare Access JWTs are verified separately in `workers/api/src/access.rs`
+# when TEAM_DOMAIN and POLICY_AUD are configured; otherwise owner access falls
+# through to the application session / break-glass credential paths.
 workers_dev = true
 
 [build]

@@ -217,7 +217,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let rebuilt = rebuild_request(Method::Post, &url, headers, body_text)?;
         return forward_to_owner_do(rebuilt, &env, owner_key).await;
     }
-    if req.path().starts_with("/scratch/") && req.method() == Method::Get {
+    if req.path().starts_with("/scratch/") {
         let url = req.url()?;
         let token = url
             .query_pairs()
