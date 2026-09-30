@@ -99,3 +99,10 @@ EMAIL_FROM = "noreply@rajvansh.dev"
 #                -> "Application Audience (AUD) Tag"
 TEAM_DOMAIN = ""
 POLICY_AUD = ""
+
+# Scheduled repo sync (not active until next deploy with Node/wrangler auth).
+# Uncomment to enable hourly sync-all via the Worker scheduled event once
+# workers/api exposes #[event(scheduled)] wiring to POST /organic/repositories/sync-all
+# for each owner DO. Until then, operators call POST /organic/repositories/sync-all.
+# [triggers]
+# crons = ["0 * * * *"]
