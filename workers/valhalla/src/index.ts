@@ -27,8 +27,10 @@ export default {
       const token = params.get("token");
       const knock_id = params.get("knock_id");
       const label = params.get("label") ?? "unnamed";
+      const bootstrap = params.get("bootstrap") === "1";
       if (!token) return jsonErr(400, "missing_token");
-      if (!knock_id) return jsonErr(400, "missing_knock_id");
+      // Bootstrap (operator key-create) needs no knock; normal provision does.
+      if (!bootstrap && !knock_id) return jsonErr(400, "missing_knock_id");
 
       const verify = await env.CURATOM_KERNEL.fetch(
         `https://kernel/organic/keys/verify?token=${encodeURIComponent(token)}`
@@ -36,11 +38,52 @@ export default {
       if (!verify.ok) return jsonErr(401, "token_not_recognized");
       const verifyBody = (await verify.json()) as { workspace_id?: string };
 
+      if (bootstrap) {
+        // Operator just minted the key — authorize via HMAC bootstrap, not knock.
+        const authBody = `token=${encodeURIComponent(token)}&bootstrap=1`;
+        const authSig = await internalHmac(env, authBody);
+        const authResp = await env.CURATOM_KERNEL.fetch(
+          `https://kernel/internal/authorize-bootstrap?${authBody}`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              "x-curatom-hmac": authSig,
+            },
+            body: authBody,
+          }
+        );
+        if (!authResp.ok) {
+          const detail = await authResp.text();
+          return jsonErr(403, `bootstrap_not_authorized:${detail}`);
+        }
+        const sandboxId = await sandboxIdFor(
+          verifyBody.workspace_id,
+          `bootstrap-${Date.now()}`,
+        );
+        getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
+        await env.CURATOM_LEDGER.prepare(
+          `INSERT OR REPLACE INTO sessions
+           (session_id, key_hash, key_label, opened_at, round_count, intent_count, pattern_count)
+           VALUES (?1, ?2, ?3, ?4, 1, 0, 0)`
+        ).bind(sandboxId, await sha256(token), label, new Date().toISOString()).run();
+        await appendLog(env, sandboxId, "bootstrap", label, "key_create");
+        return jsonOk({
+          sandbox_id: sandboxId,
+          workspace_id: verifyBody.workspace_id ?? null,
+          url: `${env.VALHALLA_BASE_URL}/valhalla/${sandboxId}`,
+          frozen: [],
+          materialized: [],
+          restored: [],
+          bootstrap: true,
+        });
+      }
+
       const scope = (params.get("scope") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
       if (scope.length === 0) return jsonErr(400, "missing_scope");
 
       const authBody =
-        `knock_id=${encodeURIComponent(knock_id)}` +
+        `knock_id=${encodeURIComponent(knock_id!)}` +
         `&token=${encodeURIComponent(token)}` +
         `&scope=${encodeURIComponent(scope.join(","))}`;
       const authSig = await internalHmac(env, authBody);
@@ -70,9 +113,12 @@ export default {
       // recover the right owner from `session_id` alone. Falls back to
       // the old per-knock id only for a token minted before this field
       // existed (`workspace_id` empty via `serde(default)`).
-      const sandboxId = verifyBody.workspace_id ? `vh-${verifyBody.workspace_id}` : `vh-${knock_id}`;
+      const sandboxId = await sandboxIdFor(
+        verifyBody.workspace_id,
+        knock_id!,
+      );
       // SDK: get-or-create. Container starts on first exec, not here.
-      const sandbox = getSandbox(env.Sandbox, sandboxId);
+      const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
 
       // If a checkpoint was named, restore it *before* the repository
       // materialization below -- the checkpoint represents the state
@@ -180,7 +226,7 @@ export default {
       if (!command) return jsonErr(400, "missing_cmd");
 
       try {
-        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
         const result = await sandbox.exec(command);
         const stdout = (result as { stdout?: string }).stdout ?? "";
         const stderr = (result as { stderr?: string }).stderr ?? "";
@@ -199,7 +245,7 @@ export default {
       if (!filePath) return jsonErr(400, "missing_path");
 
       try {
-        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
         await sandbox.writeFile(filePath, content);
         await appendLog(env, sandboxId, "write", filePath, `${content.length} bytes`);
         return jsonOk({ written: filePath, bytes: content.length });
@@ -214,7 +260,7 @@ export default {
       if (!filePath) return jsonErr(400, "missing_path");
 
       try {
-        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
         const raw = await sandbox.readFile(filePath);
         // Cloudflare Sandbox may return either a string or a result object
         // containing `content`; normalize both shapes without serializing the
@@ -269,7 +315,7 @@ export default {
       if (!checkpointId) return jsonErr(400, "missing_checkpoint_id");
 
       try {
-        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
         const result = await snapshotWorkspace(env, sandbox, keyHash, checkpointId, sandboxId);
         await appendLog(
           env,
@@ -294,7 +340,7 @@ export default {
       if (manifestRef.includes("..")) return jsonErr(400, "bad_manifest_ref");
 
       try {
-        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
         const written = await restoreFromManifest(env, sandbox, manifestRef);
         await appendLog(env, sandboxId, "restore", manifestRef, `${written.length} files`);
         return jsonOk({ manifest_ref: manifestRef, written });
@@ -357,7 +403,7 @@ export default {
       ).bind(new Date().toISOString(), receiptRef, sandboxId).run();
 
       try {
-        const sandbox = getSandbox(env.Sandbox, sandboxId);
+        const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
         await sandbox.destroy();
       } catch {
         // already gone
@@ -425,6 +471,19 @@ function hmacKeyBytes(secret: string): Uint8Array {
     return new TextEncoder().encode(secret);
   }
 }
+
+
+async function sandboxIdFor(workspaceId: string | null | undefined, fallback: string): Promise<string> {
+  const raw = workspaceId && workspaceId.length > 0 ? workspaceId : fallback;
+  const full = `vh-${raw}`;
+  if (full.length <= 63) return full;
+  const owner = raw.split(".")[0] || "ws";
+  const digest = await sha256(raw);
+  const prefix = `vh-${owner}.`;
+  const room = Math.max(8, 63 - prefix.length);
+  return `${prefix}${digest.slice(0, room)}`;
+}
+
 
 async function internalHmac(env: Env, body: string): Promise<string> {
   const key = hmacKeyBytes(env.CURATOM_KERNEL_HMAC);
