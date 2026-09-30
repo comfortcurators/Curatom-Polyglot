@@ -118,6 +118,11 @@ fn parse_duration(v: &Value) -> Result<Duration, (u16, Value)> {
                 .ok_or((400, json!({"error":"bad_duration"})))?;
             Ok(Duration::Ttl { seconds })
         }
+        // Machines may *request* standing in a knock body, but the kernel
+        // will not honor it unless an operator-issued StandingGrant already
+        // covers the scope. Asking for standing without a grant still
+        // creates a normal pending knock.
+        Some("standing") => Ok(Duration::Standing),
         _ => Err((400, json!({"error":"bad_duration"}))),
     }
 }
