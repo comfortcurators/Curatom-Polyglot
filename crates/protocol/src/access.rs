@@ -173,3 +173,32 @@ pub struct Freeze {
     pub release_reason: Option<String>,
     pub release_parity_ok: Option<bool>,
 }
+
+/// Operator-issued standing access for named resources.
+///
+/// Standing grants are the only way to skip the 88-second knock window.
+/// They are minted exclusively by the organic operator path — never by a
+/// machine knock. Eligible resources are deliberately narrow (Cloudflare
+/// inventory, company whitepaper/inventory, repositories); sensitive
+/// scopes such as `valhalla.*` and `hostos.*` still require an explicit
+/// knock. Every use is logged as `standing.used`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingGrant {
+    pub id: String,
+    pub owner_id: String,
+    /// When set, only this token may use the grant. When `None` / empty,
+    /// any live token belonging to this owner may use it.
+    #[serde(default)]
+    pub token: Option<String>,
+    pub label: String,
+    pub resources: Vec<String>,
+    pub permissions: Vec<crate::Permission>,
+    pub created_at: String,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+    /// Count of times this standing grant short-circuited a knock.
+    #[serde(default)]
+    pub use_count: u64,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+}
