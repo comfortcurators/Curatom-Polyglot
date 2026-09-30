@@ -1,22 +1,18 @@
 # Workspace wire patches
 
-Complete standing/workspace wire-up on this branch tip (`standing.rs`, `workspace.rs`,
-protocol `StandingGrant`, ports `STANDING`, docs, env notes already present).
-
 ```bash
 ./scripts/apply-workspace-wire.sh
 ```
 
-Plain patches (preferred):
-- `01-kernel-substrate-wire.patch` **or** `01a-kernel-wire.patch` + `01b-substrate-wire.patch`
-- `02a-worker-api-wire.patch` **or** `02a-part{0..3}-worker-api-wire.patch`
-- `02b-valhalla-bootstrap.patch`
+On this branch tip that already has `standing.rs`, `workspace.rs`, protocol/ports/docs:
 
-Verified: sequential `git apply --check` on `feat/company-workspace-standing`.
+| Patch | Status on branch |
+|-------|------------------|
+| `01a-part0` + `01a-part1` + `01b` | plain ✓ (kernel + substrate standing wire) |
+| `02a-worker-api-wire.patch.gz.b64` | valid gzip+b64 ✓ (materialized by apply script) |
+| `02b-valhalla-bootstrap.patch` | plain ✓ |
+| `01-*.gz.b64` | **corrupt** — ignored; use 01a/01b splits |
 
-After apply: reusable standing, DO standing storage, standing CRUD + `/organic/audit`,
-Valhalla bootstrap on key create, CF inventory adapter, standing short-circuit on
-submit, `/organic/repositories/sync-all`.
+After apply: reusable standing, DO standing storage, standing CRUD + `/organic/audit`, Valhalla bootstrap on key create, CF inventory adapter, standing short-circuit on submit, `/organic/repositories/sync-all`.
 
-**Not live until deploy.** Needs wrangler auth + Node >=22 for curatom-kernel,
-curatom-orchestrator, and curatom-valhalla. Do not delete Workers/D1.
+**Not live until deploy.** Needs wrangler auth + Node ≥22 for curatom-kernel / orchestrator / valhalla. Do not delete Workers/D1.
