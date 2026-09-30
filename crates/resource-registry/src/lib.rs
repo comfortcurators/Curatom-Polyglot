@@ -29,3 +29,26 @@ pub fn all() -> &'static [&'static str] {
         REPOSITORY_INVENTORY,
     ]
 }
+
+/// Resources an operator may put on a standing grant.
+///
+/// Deliberately excludes `valhalla.*` and `hostos.*` — those stay on the
+/// 88-second knock path. Standing is for company context, Cloudflare
+/// inventory, and repository reads that an AI needs repeatedly without
+/// tapping the operator every time.
+pub fn standing_eligible(r: &str) -> bool {
+    r == CLOUDFLARE_INVENTORY
+        || r == COMPANY_WHITEPAPER
+        || r == COMPANY_INVENTORY
+        || r == REPOSITORY_INVENTORY
+        || (r.starts_with("repository.") && r != REPOSITORY_INVENTORY)
+}
+
+pub fn all_standing_eligible() -> &'static [&'static str] {
+    &[
+        CLOUDFLARE_INVENTORY,
+        COMPANY_WHITEPAPER,
+        COMPANY_INVENTORY,
+        REPOSITORY_INVENTORY,
+    ]
+}

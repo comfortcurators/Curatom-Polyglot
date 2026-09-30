@@ -1,0 +1,118 @@
+diff --git a/crates/key-kernel/src/lib.rs b/crates/key-kernel/src/lib.rs
+index 36563ed..93504fc 100644
+--- a/crates/key-kernel/src/lib.rs
++++ b/crates/key-kernel/src/lib.rs
+@@ -3,7 +3,9 @@
+ use curatom_crypto::{iso_plus_secs, random_id, request_digest, sha256_hex};
+ use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
+ use curatom_protocol::*;
+-use curatom_resource_registry::known_resource;
++use curatom_resource_registry::{known_resource, standing_eligible};
++
++mod standing;
+ 
+ /// Storage-budget caps for the two unbounded `Vec`s in `KernelState`.
+ ///
+@@ -371,12 +373,13 @@ where
+             return Ok(None);
+         }
+         let now = self.clock.now_unix();
+-        let (expires_unix, expires_at) = match &approval.duration {
+-            Duration::SingleUse => (0, None),
++        let (expires_unix, expires_at, reusable) = match &approval.duration {
++            Duration::SingleUse => (0, None, false),
+             Duration::Ttl { seconds } => {
+                 let exp = now + *seconds as i64;
+-                (exp, Some(exp.to_string()))
++                (exp, Some(exp.to_string()), false)
+             }
++            Duration::Standing => (0, None, true),
+         };
+         let secret = CapabilitySecret {
+             token: random_id("tok"),
+@@ -388,6 +391,7 @@ where
+             intent_id: approval.intent_id.clone(),
+             expires_at,
+             expires_unix,
++            reusable,
+         };
+         {
+             let st = self.st_mut()?;
+@@ -438,21 +442,31 @@ where
+         if grant.expires_at.is_some() && grant.expires_unix <= now {
+             return Err("capability_expired".into());
+         }
+-        let key = KernelState::consume_key(&grant.grant_id, resource, op);
+-        {
+-            let st = self.st_mut()?;
+-            if st.consumed.contains(&key) {
+-                return Err("already_consumed".into());
++        if !grant.reusable {
++            let key = KernelState::consume_key(&grant.grant_id, resource, op);
++            {
++                let st = self.st_mut()?;
++                if st.consumed.contains(&key) {
++                    return Err("already_consumed".into());
++                }
++                st.consumed.insert(key);
+             }
+-            st.consumed.insert(key);
++            self.mark(DirtyKinds::CONSUMED.with(DirtyKinds::ACTIVITY));
++            self.note(
++                "capability.consumed",
++                format!("spent {resource} {}", op.as_str()),
++                None,
++                None,
++            );
++        } else {
++            self.mark(DirtyKinds::ACTIVITY);
++            self.note(
++                "capability.used",
++                format!("standing {resource} {}", op.as_str()),
++                None,
++                None,
++            );
+         }
+-        self.mark(DirtyKinds::CONSUMED.with(DirtyKinds::ACTIVITY));
+-        self.note(
+-            "capability.consumed",
+-            format!("spent {resource} {}", op.as_str()),
+-            None,
+-            None,
+-        );
+         self.persist().await?;
+         Ok(grant)
+     }
+@@ -1301,6 +1315,7 @@ where
+         self.persist().await
+     }
+ 
++
+     pub async fn issue_knock_grant(&mut self, knock: &Knock) -> Result<Option<IssuedGrant>, String> {
+         if self.st()?.issued.contains(&knock.id) {
+             return Ok(None);
+@@ -1309,12 +1324,13 @@ where
+             return Ok(None);
+         }
+         let now = self.clock.now_unix();
+-        let (expires_unix, expires_at) = match &knock.duration {
+-            Duration::SingleUse => (0, None),
++        let (expires_unix, expires_at, reusable) = match &knock.duration {
++            Duration::SingleUse => (0, None, false),
+             Duration::Ttl { seconds } => {
+                 let exp = now + *seconds as i64;
+-                (exp, Some(exp.to_string()))
++                (exp, Some(exp.to_string()), false)
+             }
++            Duration::Standing => (0, None, true),
+         };
+         let secret = CapabilitySecret {
+             token: random_id("tok"),
+@@ -1326,6 +1342,7 @@ where
+             intent_id: knock.id.clone(),
+             expires_at,
+             expires_unix,
++            reusable,
+         };
+         {
+             let st = self.st_mut()?;

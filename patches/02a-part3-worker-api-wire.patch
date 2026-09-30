@@ -1,0 +1,30 @@
+diff --git a/workers/api/src/lib.rs b/workers/api/src/lib.rs
+index 1264bb8..a637703 100644
+--- a/workers/api/src/lib.rs
++++ b/workers/api/src/lib.rs
+@@ -2803,6 +3075,7 @@ fn locally_dispatchable(resource: &str) -> bool {
+     resource == curatom_resource_registry::COMPANY_WHITEPAPER
+         || resource == curatom_resource_registry::COMPANY_INVENTORY
+         || resource == curatom_resource_registry::REPOSITORY_INVENTORY
++        || resource == curatom_resource_registry::CLOUDFLARE_INVENTORY
+         || (resource.starts_with("repository.")
+             && resource != curatom_resource_registry::REPOSITORY_INVENTORY)
+         || resource.starts_with("compute.")
+@@ -2813,10 +3086,17 @@ fn locally_dispatchable(resource: &str) -> bool {
+ /// call records. Never called for a resource the orchestrator handles --
+ /// see `locally_dispatchable`.
+ async fn execute_locally(
++    env: &Env,
+     k: &mut K,
+     resource: &str,
+     op: Permission,
+ ) -> (bool, Option<Value>, Option<String>) {
++    // `cloudflare.inventory` — real CF API when CLOUDFLARE_API_TOKEN +
++    // CLOUDFLARE_ACCOUNT_ID secrets exist on the Worker; otherwise an
++    // honest credentials_not_configured result (never invents inventory).
++    if resource == curatom_resource_registry::CLOUDFLARE_INVENTORY {
++        return workspace::fetch_cloudflare_inventory(env).await;
++    }
+     // `company.inventory` -- what this account actually holds. Not a
+     // list of "internal assets" in the abstract (the account has no
+     // such concept, and pretending it does would be a lie in the

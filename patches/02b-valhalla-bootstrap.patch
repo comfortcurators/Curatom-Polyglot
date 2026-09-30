@@ -1,0 +1,69 @@
+diff --git a/workers/valhalla/src/index.ts b/workers/valhalla/src/index.ts
+index 0c24fa6..f86d006 100644
+--- a/workers/valhalla/src/index.ts
++++ b/workers/valhalla/src/index.ts
+@@ -27,8 +27,10 @@ export default {
+       const token = params.get("token");
+       const knock_id = params.get("knock_id");
+       const label = params.get("label") ?? "unnamed";
++      const bootstrap = params.get("bootstrap") === "1";
+       if (!token) return jsonErr(400, "missing_token");
+-      if (!knock_id) return jsonErr(400, "missing_knock_id");
++      // Bootstrap (operator key-create) needs no knock; normal provision does.
++      if (!bootstrap && !knock_id) return jsonErr(400, "missing_knock_id");
+ 
+       const verify = await env.CURATOM_KERNEL.fetch(
+         `https://kernel/organic/keys/verify?token=${encodeURIComponent(token)}`
+@@ -36,11 +38,51 @@ export default {
+       if (!verify.ok) return jsonErr(401, "token_not_recognized");
+       const verifyBody = (await verify.json()) as { workspace_id?: string };
+ 
++      if (bootstrap) {
++        // Operator just minted the key — authorize via HMAC bootstrap, not knock.
++        const authBody = `token=${encodeURIComponent(token)}&bootstrap=1`;
++        const authSig = await internalHmac(env, authBody);
++        const authResp = await env.CURATOM_KERNEL.fetch(
++          `https://kernel/internal/authorize-bootstrap?${authBody}`,
++          {
++            method: "POST",
++            headers: {
++              "content-type": "application/x-www-form-urlencoded",
++              "x-curatom-hmac": authSig,
++            },
++            body: authBody,
++          }
++        );
++        if (!authResp.ok) {
++          const detail = await authResp.text();
++          return jsonErr(403, `bootstrap_not_authorized:${detail}`);
++        }
++        const sandboxId = verifyBody.workspace_id
++          ? `vh-${verifyBody.workspace_id}`
++          : `vh-bootstrap-${Date.now()}`;
++        getSandbox(env.Sandbox, sandboxId);
++        await env.CURATOM_LEDGER.prepare(
++          `INSERT OR REPLACE INTO sessions
++           (session_id, key_hash, key_label, opened_at, round_count, intent_count, pattern_count)
++           VALUES (?1, ?2, ?3, ?4, 1, 0, 0)`
++        ).bind(sandboxId, await sha256(token), label, new Date().toISOString()).run();
++        await appendLog(env, sandboxId, "bootstrap", label, "key_create");
++        return jsonOk({
++          sandbox_id: sandboxId,
++          workspace_id: verifyBody.workspace_id ?? null,
++          url: `${env.VALHALLA_BASE_URL}/valhalla/${sandboxId}`,
++          frozen: [],
++          materialized: [],
++          restored: [],
++          bootstrap: true,
++        });
++      }
++
+       const scope = (params.get("scope") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+       if (scope.length === 0) return jsonErr(400, "missing_scope");
+ 
+       const authBody =
+-        `knock_id=${encodeURIComponent(knock_id)}` +
++        `knock_id=${encodeURIComponent(knock_id!)}` +
+         `&token=${encodeURIComponent(token)}` +
+         `&scope=${encodeURIComponent(scope.join(","))}`;
+       const authSig = await internalHmac(env, authBody);
