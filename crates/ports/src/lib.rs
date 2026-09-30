@@ -39,6 +39,7 @@ impl DirtyKinds {
     pub const REPOSITORIES: Self = Self(1 << 12);
     pub const CHECKPOINTS: Self = Self(1 << 13);
     pub const WHITEPAPER: Self = Self(1 << 14);
+    pub const STANDING: Self = Self(1 << 15);
 
     pub fn new() -> Self {
         Self::NONE
