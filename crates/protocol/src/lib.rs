@@ -3,7 +3,7 @@
 pub mod access;
 pub use access::{
     Checkpoint, Connector, ConnectorHeader, Freeze, KeyLogEntry, Knock, KnockStatus,
-    OrganicMeView, OrganicToken, OwnerRecord, Repository, KNOCK_TTL_SECS,
+    OrganicMeView, OrganicToken, OwnerRecord, Repository, StandingGrant, KNOCK_TTL_SECS,
 };
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,10 @@ impl Permission {
 pub enum Duration {
     SingleUse,
     Ttl { seconds: u64 },
+    /// Operator-issued standing access. Skips the 88s knock for the named
+    /// resources while every use is still logged. Machines cannot mint this
+    /// themselves — only the organic operator path can.
+    Standing,
 }
 
 impl Duration {
@@ -44,7 +48,12 @@ impl Duration {
         match self {
             Duration::SingleUse => "single-use".into(),
             Duration::Ttl { seconds } => format!("ttl:{seconds}s"),
+            Duration::Standing => "standing".into(),
         }
+    }
+
+    pub fn is_standing(&self) -> bool {
+        matches!(self, Duration::Standing)
     }
 }
 
@@ -59,10 +68,15 @@ pub struct CapabilitySecret {
     pub request_digest: String,
     /// Set at issue_grant from the approval's intent. Not a digest.
     pub intent_id: String,
-    /// For humans / logs. None on single-use.
+    /// For humans / logs. None on single-use / standing.
     pub expires_at: Option<String>,
-    /// For the kernel. 0 = single-use. Compare integers. Do not parse dates.
+    /// For the kernel. 0 = single-use or standing. Compare integers. Do not parse dates.
     pub expires_unix: i64,
+    /// When true, `consume_capability` does not mark the (grant, resource, op)
+    /// triple spent. Set for `Duration::Standing` grants so CF/GitHub/company
+    /// reads can reuse the same grant while every consumption is still logged.
+    #[serde(default)]
+    pub reusable: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +201,10 @@ pub struct KernelState {
     /// writes one.
     #[serde(default)]
     pub whitepaper: Option<String>,
+    /// Operator-issued standing grants. Skip the 88s knock for named
+    /// standing-eligible resources while still logging every use.
+    #[serde(default)]
+    pub standing_grants: HashMap<String, StandingGrant>,
 }
 
 impl KernelState {
@@ -257,7 +275,7 @@ pub struct ApprovalView {
 /// existed. The Activity tile had never once displayed anything, for
 /// any account, since it was built. Confirmed live: registered a real
 /// account, read the raw `/organic/activity` response, and it was
-/// exactly `{"kind":...,"summary":...}` with no `at` at all.
+/// exactly `{\"kind\":...,\"summary\":...}` with no `at` at all.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActivityView {
     pub kind: String,
