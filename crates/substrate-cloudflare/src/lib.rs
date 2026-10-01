@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
 use curatom_protocol::{
     Activity, Approval, Checkpoint, Connector, Freeze, HttpRequestDto, Identity, IdentityKind,
-    Intent, KernelState, Knock, OrganicToken, Outcome, Repository,
+    Intent, KernelState, Knock, OrganicToken, Outcome, Repository, StandingGrant,
 };
 use curatom_protocol::CapabilitySecret;
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ const KEY_CONNECTORS: &str = "kernel:connectors";
 const KEY_REPOSITORIES: &str = "kernel:repositories";
 const KEY_CHECKPOINTS: &str = "kernel:checkpoints";
 const KEY_WHITEPAPER: &str = "kernel:whitepaper";
+const KEY_STANDING: &str = "kernel:standing_grants";
 
 /// The two fields of `KernelState` that are not a collection, stored
 /// together because they are both small and both change together on
@@ -264,6 +265,12 @@ impl StateStore for DOStateStore {
                     }
                 }
             }
+            if let Ok(Some(v)) = storage
+                .get::<std::collections::HashMap<String, StandingGrant>>(KEY_STANDING)
+                .await
+            {
+                state.standing_grants = v;
+            }
 
             // Best-effort cleanup of an orphaned legacy blob: the crash
             // case where meta landed but the delete did not. Failure here
@@ -298,6 +305,7 @@ impl StateStore for DOStateStore {
             guarded_put(&storage, KEY_CONNECTORS, &legacy.connectors).await?;
             guarded_put(&storage, KEY_REPOSITORIES, &legacy.repositories).await?;
             guarded_put(&storage, KEY_CHECKPOINTS, &legacy.checkpoints).await?;
+            guarded_put(&storage, KEY_STANDING, &legacy.standing_grants).await?;
             guarded_put(
                 &storage,
                 KEY_WHITEPAPER,
@@ -378,6 +386,9 @@ impl StateStore for DOStateStore {
                 &WhitepaperBlob { text: state.whitepaper.clone() },
             )
             .await?;
+        }
+        if dirty.contains(DirtyKinds::STANDING) {
+            guarded_put(&storage, KEY_STANDING, &state.standing_grants).await?;
         }
 
         // Meta unconditionally, per the struct doc above. Two short

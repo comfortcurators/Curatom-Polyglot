@@ -5,6 +5,8 @@ use curatom_ports::{ArtifactStore, Clock, DirtyKinds, EventLedger, StateStore};
 use curatom_protocol::*;
 use curatom_resource_registry::known_resource;
 
+mod standing;
+
 /// Storage-budget caps for the two unbounded `Vec`s in `KernelState`.
 ///
 /// DO storage values are limited to 128 KiB. Every entry in `activity`
@@ -371,12 +373,13 @@ where
             return Ok(None);
         }
         let now = self.clock.now_unix();
-        let (expires_unix, expires_at) = match &approval.duration {
-            Duration::SingleUse => (0, None),
+        let (expires_unix, expires_at, reusable) = match &approval.duration {
+            Duration::SingleUse => (0, None, false),
             Duration::Ttl { seconds } => {
                 let exp = now + *seconds as i64;
-                (exp, Some(exp.to_string()))
+                (exp, Some(exp.to_string()), false)
             }
+            Duration::Standing => (0, None, true),
         };
         let secret = CapabilitySecret {
             token: random_id("tok"),
@@ -388,6 +391,7 @@ where
             intent_id: approval.intent_id.clone(),
             expires_at,
             expires_unix,
+            reusable,
         };
         {
             let st = self.st_mut()?;
@@ -438,21 +442,31 @@ where
         if grant.expires_at.is_some() && grant.expires_unix <= now {
             return Err("capability_expired".into());
         }
-        let key = KernelState::consume_key(&grant.grant_id, resource, op);
-        {
-            let st = self.st_mut()?;
-            if st.consumed.contains(&key) {
-                return Err("already_consumed".into());
+        if !grant.reusable {
+            let key = KernelState::consume_key(&grant.grant_id, resource, op);
+            {
+                let st = self.st_mut()?;
+                if st.consumed.contains(&key) {
+                    return Err("already_consumed".into());
+                }
+                st.consumed.insert(key);
             }
-            st.consumed.insert(key);
+            self.mark(DirtyKinds::CONSUMED.with(DirtyKinds::ACTIVITY));
+            self.note(
+                "capability.consumed",
+                format!("spent {resource} {}", op.as_str()),
+                None,
+                None,
+            );
+        } else {
+            self.mark(DirtyKinds::ACTIVITY);
+            self.note(
+                "capability.used",
+                format!("standing {resource} {}", op.as_str()),
+                None,
+                None,
+            );
         }
-        self.mark(DirtyKinds::CONSUMED.with(DirtyKinds::ACTIVITY));
-        self.note(
-            "capability.consumed",
-            format!("spent {resource} {}", op.as_str()),
-            None,
-            None,
-        );
         self.persist().await?;
         Ok(grant)
     }
@@ -1301,6 +1315,7 @@ where
         self.persist().await
     }
 
+
     pub async fn issue_knock_grant(&mut self, knock: &Knock) -> Result<Option<IssuedGrant>, String> {
         if self.st()?.issued.contains(&knock.id) {
             return Ok(None);
@@ -1309,12 +1324,13 @@ where
             return Ok(None);
         }
         let now = self.clock.now_unix();
-        let (expires_unix, expires_at) = match &knock.duration {
-            Duration::SingleUse => (0, None),
+        let (expires_unix, expires_at, reusable) = match &knock.duration {
+            Duration::SingleUse => (0, None, false),
             Duration::Ttl { seconds } => {
                 let exp = now + *seconds as i64;
-                (exp, Some(exp.to_string()))
+                (exp, Some(exp.to_string()), false)
             }
+            Duration::Standing => (0, None, true),
         };
         let secret = CapabilitySecret {
             token: random_id("tok"),
@@ -1326,6 +1342,7 @@ where
             intent_id: knock.id.clone(),
             expires_at,
             expires_unix,
+            reusable,
         };
         {
             let st = self.st_mut()?;
@@ -1963,5 +1980,106 @@ mod tests {
         pollster::block_on(k.record_outcome(outcome)).unwrap();
         let stored = k.outcomes_for_intent("int_2").unwrap();
         assert_eq!(stored[0].data.as_ref().unwrap(), &small);
+    }
+
+    #[test]
+    fn standing_grant_covers_eligible_and_skips_ineligible() {
+        let mut k = k(1_700_000_000);
+        pollster::block_on(k.load()).unwrap();
+        let t = pollster::block_on(k.create_key("bot".into(), None)).unwrap();
+        let g = pollster::block_on(k.issue_standing_grant(
+            "cf-read".into(),
+            vec!["cloudflare.inventory".into(), "company.whitepaper".into()],
+            vec![Permission::Read],
+            Some(t.token.clone()),
+        ))
+        .unwrap();
+        assert!(k
+            .find_standing(
+                &t.token,
+                &["company.whitepaper".into()],
+                &[Permission::Read]
+            )
+            .is_some());
+        // hostos is not standing-eligible -- find returns None
+        assert!(k
+            .find_standing(
+                &t.token,
+                &["hostos.inventory".into()],
+                &[Permission::Read]
+            )
+            .is_none());
+        // issuing standing for hostos fails
+        let err = pollster::block_on(k.issue_standing_grant(
+            "bad".into(),
+            vec!["hostos.inventory".into()],
+            vec![Permission::Read],
+            None,
+        ))
+        .unwrap_err();
+        assert!(err.starts_with("resource_not_standing_eligible"));
+        pollster::block_on(k.revoke_standing_grant(&g.id)).unwrap();
+        assert!(k
+            .find_standing(
+                &t.token,
+                &["company.whitepaper".into()],
+                &[Permission::Read]
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn standing_capability_is_reusable() {
+        let mut k = k(1_700_000_000);
+        pollster::block_on(k.load()).unwrap();
+        let t = pollster::block_on(k.create_key("bot".into(), None)).unwrap();
+        let stg = pollster::block_on(k.issue_standing_grant(
+            "wp".into(),
+            vec!["company.whitepaper".into()],
+            vec![Permission::Read],
+            Some(t.token.clone()),
+        ))
+        .unwrap();
+        let kn = pollster::block_on(k.create_knock(
+            t.token.clone(),
+            "reader".into(),
+            "need whitepaper".into(),
+            vec!["company.whitepaper".into()],
+            vec![Permission::Read],
+            Duration::SingleUse,
+        ))
+        .unwrap();
+        let kn = pollster::block_on(k.apply_standing_to_knock(&kn.id, &stg.id)).unwrap();
+        assert_eq!(kn.status, KnockStatus::Approved);
+        assert!(kn.duration.is_standing());
+        let issued = pollster::block_on(k.issue_knock_grant(&kn)).unwrap().unwrap();
+        assert!(issued.handle.secret.reusable);
+        pollster::block_on(k.consume_capability(
+            &issued.handle.secret.token,
+            &issued.handle.secret.requester_id,
+            "company.whitepaper",
+            Permission::Read,
+        ))
+        .unwrap();
+        // second consume must also succeed for standing
+        pollster::block_on(k.consume_capability(
+            &issued.handle.secret.token,
+            &issued.handle.secret.requester_id,
+            "company.whitepaper",
+            Permission::Read,
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn valhalla_bootstrap_requires_live_token() {
+        let mut k = k(1_700_000_000);
+        pollster::block_on(k.load()).unwrap();
+        assert_eq!(
+            k.authorize_valhalla_bootstrap("nope").unwrap_err(),
+            "token_not_recognized"
+        );
+        let t = pollster::block_on(k.create_key("bot".into(), None)).unwrap();
+        k.authorize_valhalla_bootstrap(&t.token).unwrap();
     }
 }
