@@ -1081,6 +1081,10 @@ impl CuratomKernel {
                 );
                 let mut init = RequestInit::new();
                 init.with_method(Method::Get);
+                // Valhalla acts only for the key that owns the sandbox.
+                let headers = Headers::new();
+                let _ = headers.set("x-curatom-token", &token);
+                init.with_headers(headers);
                 let req = match Request::new_with_init(&url, &init) {
                     Ok(r) => r,
                     Err(e) => {

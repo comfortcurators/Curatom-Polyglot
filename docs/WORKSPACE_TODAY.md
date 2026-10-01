@@ -41,3 +41,17 @@ computer, (3) standing CF + GitHub access without constant approve taps,
   `autosave-latest` if it exists (`fresh=1` starts empty).
 - Valhalla Worker deployed with `--containers-rollout=none`: the container
   image was not rebuilt (no Docker daemon in the deploying environment).
+
+## 1 Oct 2026 — sandbox actions need the owning key
+
+Before this, `exec`, `write`, `read`, `parity`, `snapshot`, `restore` and
+`close` ran for anyone who knew a sandbox id, and sandbox ids appear in logs
+and receipts. Each now requires the owning key (`x-curatom-token` header or
+`token` query) whose hash matches the session's `key_hash`; otherwise 401
+`missing_token` or 403 `not_this_sandbox`. `status` stays open. The kernel's
+checkpoint call sends the key. Both Workers deployed and checked: no key →
+401, wrong key → 403, owning key → runs.
+
+Agent credentials: Cloudflare KV namespace `claude-workspace-vault` holds the
+agent's Curatom key, its Valhalla sandbox id and the current owner
+break-glass (`RAJ_TOKEN` was rotated to mint the key).
