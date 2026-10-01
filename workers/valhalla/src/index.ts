@@ -232,6 +232,22 @@ export default {
       });
     }
 
+    // Everything that acts on a sandbox needs the key that owns it: the
+    // sandbox id alone is not a secret (it shows up in logs and receipts).
+    // The key arrives as `token` (query) or the `x-curatom-token` header and
+    // must hash to the session's recorded key_hash.
+    const acting = path.match(/^\/valhalla\/([^/]+)\/(exec|write|read|parity|snapshot|restore|close)$/);
+    if (acting) {
+      const presented = request.headers.get("x-curatom-token") ?? params.get("token") ?? "";
+      if (!presented) return jsonErr(401, "missing_token");
+      const row = await env.CURATOM_LEDGER.prepare(
+        `SELECT key_hash FROM sessions WHERE session_id = ?1`
+      ).bind(acting[1]).first<{ key_hash: string }>();
+      if (!row || row.key_hash !== (await sha256(presented))) {
+        return jsonErr(403, "not_this_sandbox");
+      }
+    }
+
     if (path.match(/^\/valhalla\/[^/]+\/exec$/) && request.method === "GET") {
       const sandboxId = path.split("/")[2];
       const command = params.get("cmd");
