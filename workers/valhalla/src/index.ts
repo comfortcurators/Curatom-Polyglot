@@ -13,6 +13,9 @@ interface Env {
   CURATOM_KERNEL_HMAC: string;
 }
 
+/// The checkpoint every session saves on close and the next one restores.
+const AUTOSAVE_ID = "autosave-latest";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -163,6 +166,15 @@ export default {
             checkpointId,
             `${restored.length} files`
           );
+        }
+      } else if (params.get("fresh") !== "1") {
+        // No checkpoint named: pick up where this key's last session left
+        // off. The autosave lives under this key's own hash, so one key can
+        // never restore another's. `fresh=1` starts empty instead.
+        const autosaveRef = `checkpoints/manifests/${await sha256(token)}/${AUTOSAVE_ID}.json`;
+        if (await env.CURATOM_ARTIFACTS.head(autosaveRef)) {
+          restored = await restoreFromManifest(env, sandbox, autosaveRef);
+          await appendLog(env, sandboxId, "autosave_restore", AUTOSAVE_ID, `${restored.length} files`);
         }
       }
 
@@ -383,6 +395,25 @@ export default {
         frozen?: string[];
       };
       const frozen = releaseJson.frozen ?? [];
+
+      // Save the workspace before the sandbox goes, unless asked not to
+      // (`snapshot=0`). The next provision for the same key restores it.
+      let autosave: { file_count: number; manifest_ref?: string } | { error: string } | null = null;
+      if (params.get("snapshot") !== "0") {
+        const row = await env.CURATOM_LEDGER.prepare(
+          `SELECT key_hash FROM sessions WHERE session_id = ?1`
+        ).bind(sandboxId).first<{ key_hash: string }>();
+        if (row?.key_hash) {
+          try {
+            const sandbox = getSandbox(env.Sandbox, sandboxId, { normalizeId: true });
+            autosave = await snapshotWorkspace(env, sandbox, row.key_hash, AUTOSAVE_ID, sandboxId);
+            await appendLog(env, sandboxId, "autosave", AUTOSAVE_ID, `${autosave.file_count} files`);
+          } catch (e) {
+            // A failed save never blocks closing; the receipt says it failed.
+            autosave = { error: String(e) };
+          }
+        }
+      }
       const entries = await sessionLog(env, sandboxId);
 
       const receipt = {
@@ -392,6 +423,7 @@ export default {
         parity_note: parityNote,
         freezes_released: releaseJson.released,
         frozen,
+        autosave,
         log: entries,
       };
 
@@ -412,6 +444,7 @@ export default {
       return jsonOk({
         closed: true,
         receipt_ref: receiptRef,
+        autosave,
         freezes_released: releaseJson.released,
         frozen,
       });

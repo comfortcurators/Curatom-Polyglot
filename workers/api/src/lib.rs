@@ -42,6 +42,7 @@ mod auth_users;
 mod mail;
 mod passkey;
 mod scratchpad;
+mod workspace;
 pub use scratchpad::Scratchpad;
 
 const LLM_GUIDE: &str = include_str!("../../../docs/llm-guide.md");
@@ -141,6 +142,12 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // form-encoded, in the query string on this one (Valhalla builds
         // it that way, see workers/valhalla/src/index.ts) -- no body
         // rebuild needed, unlike /inorganic/submit below.
+        let url = req.url()?;
+        let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
+        let owner_key = owner_key_or_default(&env, token.as_deref())?;
+        return forward_to_owner_do(req, &env, owner_key).await;
+    }
+    if req.path() == "/internal/authorize-bootstrap" && req.method() == Method::Post {
         let url = req.url()?;
         let token = url.query_pairs().find(|(k, _)| k == "token").map(|(_, v)| v.into_owned());
         let owner_key = owner_key_or_default(&env, token.as_deref())?;
@@ -495,6 +502,17 @@ impl DurableObject for CuratomKernel {
                 self.h_refuse_knock(&hr, &id).await
             }
             ("GET", "/organic/activity") => self.h_activity(&hr).await,
+            ("GET", "/organic/audit") => self.h_audit(&hr).await,
+            ("GET", "/organic/standing") => self.h_list_standing(&hr).await,
+            ("POST", "/organic/standing") => self.h_issue_standing(&hr).await,
+            ("POST", p) if p.starts_with("/organic/standing/") && p.ends_with("/revoke") => {
+                let id = p
+                    .trim_start_matches("/organic/standing/")
+                    .trim_end_matches("/revoke")
+                    .to_string();
+                self.h_revoke_standing(&hr, &id).await
+            }
+            ("POST", "/organic/repositories/sync-all") => self.h_sync_all_repositories(&hr).await,
             ("GET", "/organic/billboard") => self.h_billboard(&hr).await,
             ("GET", p) if p.starts_with("/organic/billboard/blob") => {
                 self.h_billboard_blob(&hr).await
@@ -506,6 +524,9 @@ impl DurableObject for CuratomKernel {
             ("POST", "/internal/release-session") => self.h_internal_release_session(&hr).await,
             ("POST", "/internal/authorize-provision") => {
                 self.h_internal_authorize_provision(&hr).await
+            }
+            ("POST", "/internal/authorize-bootstrap") => {
+                self.h_internal_authorize_bootstrap(&hr).await
             }
             ("POST", "/internal/checkpoint-resolve") => {
                 self.h_internal_checkpoint_resolve(&hr).await
@@ -908,24 +929,34 @@ impl CuratomKernel {
             .unwrap_or("")
             .to_string();
         let validity_seconds = body.get("validity_seconds").and_then(|v| v.as_u64());
-        let mut k = self.kernel.borrow_mut();
-        let Some(k) = k.as_mut() else {
-            return (503, json!({ "error": "kernel_not_ready" }));
+        // Drop the kernel RefCell before any Valhalla await — same discipline
+        // as h_approve_knock (Valhalla calls back into this DO).
+        let created = {
+            let mut k = self.kernel.borrow_mut();
+            let Some(k) = k.as_mut() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            match k.create_key(label, validity_seconds).await {
+                Ok(t) => t,
+                Err(e) => return (400, json!({ "error": e })),
+            }
         };
-        match k.create_key(label, validity_seconds).await {
-            Ok(t) => (
-                201,
-                json!({
-                    "token": t.token,
-                    "label": t.label,
-                    "created_at": t.created_at,
-                    "validity_seconds": t.validity_seconds,
-                    "expires_unix": t.expires_unix,
-                    "file_text": key_file_text(&t),
-                }),
-            ),
-            Err(e) => (400, json!({ "error": e })),
-        }
+        let (valhalla_sandbox_id, valhalla_error) =
+            workspace::bootstrap_valhalla_for_key(self, &created).await;
+        (
+            201,
+            json!({
+                "token": created.token,
+                "label": created.label,
+                "created_at": created.created_at,
+                "workspace_id": created.workspace_id,
+                "validity_seconds": created.validity_seconds,
+                "expires_unix": created.expires_unix,
+                "file_text": key_file_text(&created),
+                "valhalla_sandbox_id": valhalla_sandbox_id,
+                "valhalla_error": valhalla_error,
+            }),
+        )
     }
 
     async fn h_revoke_key(&self, hr: &HttpRequestDto, token: &str) -> Reply {
@@ -1425,7 +1456,7 @@ impl CuratomKernel {
                         return (500, json!({ "error": e }));
                     }
                     if locally_dispatchable(resource) {
-                        let (ok, data, error) = execute_locally(k, resource, *op).await;
+                        let (ok, data, error) = execute_locally(&self.env, k, resource, *op).await;
                         let outcome = Outcome {
                             id: curatom_crypto::random_id("out"),
                             intent_id: secret.intent_id.clone(),
@@ -1699,6 +1730,176 @@ impl CuratomKernel {
             Ok(Some(_)) => (200, json!({ "ok": true })),
             Ok(None) => (409, json!({ "error": "approval_not_pending" })),
             Err(e) => (500, json!({ "error": e })),
+        }
+    }
+
+
+
+    async fn h_audit(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.audit_projection(200) {
+            Ok(v) => (200, v),
+            Err(e) => (500, json!({ "error": e })),
+        }
+    }
+
+    async fn h_list_standing(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        let list: Vec<Value> = k
+            .list_standing_grants()
+            .into_iter()
+            .map(|g| {
+                json!({
+                    "id": g.id,
+                    "label": g.label,
+                    "resources": g.resources,
+                    "permissions": g.permissions.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+                    "token_bound": g.token.as_ref().map(|t| !t.is_empty()).unwrap_or(false),
+                    "created_at": g.created_at,
+                    "revoked_at": g.revoked_at,
+                    "use_count": g.use_count,
+                    "last_used_at": g.last_used_at,
+                })
+            })
+            .collect();
+        (200, json!({
+            "standing_grants": list,
+            "eligible_resources": curatom_resource_registry::all_standing_eligible(),
+            "note": "Standing grants are operator-issued only. Sensitive scopes (valhalla.*, hostos.*) still require the 88s knock."
+        }))
+    }
+
+    async fn h_issue_standing(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let body: Value = match serde_json::from_str(&hr.body) {
+            Ok(v) => v,
+            Err(_) => return (400, json!({ "error": "invalid_json" })),
+        };
+        let label = body
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let resources: Vec<String> = body
+            .get("resources")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let permissions: Vec<Permission> = body
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(Permission::parse)
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![Permission::Read]);
+        let token = body
+            .get("token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.issue_standing_grant(label, resources, permissions, token).await {
+            Ok(g) => (
+                201,
+                json!({
+                    "id": g.id,
+                    "label": g.label,
+                    "resources": g.resources,
+                    "permissions": g.permissions.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+                    "created_at": g.created_at,
+                }),
+            ),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    async fn h_revoke_standing(&self, hr: &HttpRequestDto, id: &str) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let mut k = self.kernel.borrow_mut();
+        let Some(k) = k.as_mut() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.revoke_standing_grant(id).await {
+            Ok(g) => (200, json!({ "ok": true, "id": g.id, "revoked_at": g.revoked_at })),
+            Err(e) => (400, json!({ "error": e })),
+        }
+    }
+
+    /// Operator-triggered sync of every repository that has a GitHub token
+    /// (or is public). Scheduled/cron wiring still needs a deploy with
+    /// `[triggers] crons` — this endpoint is the hook that cron or an
+    /// operator can hit today.
+    async fn h_sync_all_repositories(&self, hr: &HttpRequestDto) -> Reply {
+        if let Err(r) = self.owner(hr).await {
+            return r;
+        }
+        let ids: Vec<String> = {
+            let k = self.kernel.borrow();
+            let Some(k) = k.as_ref() else {
+                return (503, json!({ "error": "kernel_not_ready" }));
+            };
+            k.list_repositories().into_iter().map(|r| r.id).collect()
+        };
+        let mut results = Vec::new();
+        for id in ids {
+            let (status, body) = self.h_sync_repository(hr, &id).await;
+            results.push(json!({
+                "id": id,
+                "status": status,
+                "ok": status < 400,
+                "body": body,
+            }));
+        }
+        (200, json!({ "synced": results.len(), "results": results }))
+    }
+
+    async fn h_internal_authorize_bootstrap(&self, hr: &HttpRequestDto) -> Reply {
+        if !self.hmac_ok(hr) {
+            return (
+                401,
+                json!({ "error": if hr.header("x-curatom-hmac").is_none() { "missing hmac" } else { "bad hmac" } }),
+            );
+        }
+        let url = match Url::parse(&hr.url) {
+            Ok(u) => u,
+            Err(_) => return (400, json!({ "error": "bad_url" })),
+        };
+        let params: HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let Some(token) = params.get("token").cloned() else {
+            return (400, json!({ "error": "missing_token" }));
+        };
+        let k = self.kernel.borrow();
+        let Some(k) = k.as_ref() else {
+            return (503, json!({ "error": "kernel_not_ready" }));
+        };
+        match k.authorize_valhalla_bootstrap(&token) {
+            Ok(()) => (200, json!({ "ok": true, "bootstrap": true })),
+            Err(e) => (403, json!({ "error": e })),
         }
     }
 
@@ -1995,30 +2196,100 @@ impl CuratomKernel {
         let Some(k) = k.as_mut() else {
             return (503, json!({ "error": "kernel_not_ready" }));
         };
-        match k
+        // Standing short-circuit: if an operator-issued standing grant already
+        // covers every requested (standing-eligible) resource, auto-approve
+        // without the 88s tap. Sensitive scopes never match find_standing, so
+        // they still create a pending knock.
+        let standing = k
+            .find_standing(&parsed.token, &parsed.resources, &parsed.permissions)
+            .map(|g| g.id);
+        let kn = match k
             .create_knock(
                 parsed.token,
                 parsed.name,
                 parsed.reason,
-                parsed.resources,
-                parsed.permissions,
+                parsed.resources.clone(),
+                parsed.permissions.clone(),
                 parsed.duration,
             )
             .await
         {
-            Ok(kn) => (
-                201,
+            Ok(kn) => kn,
+            Err(e) if e == "token_not_recognized" => {
+                return (401, json!({ "error": e }));
+            }
+            Err(e) => return (400, json!({ "error": e })),
+        };
+        if let Some(stg_id) = standing {
+            let kn = match k.apply_standing_to_knock(&kn.id, &stg_id).await {
+                Ok(kn) => kn,
+                Err(e) => return (500, json!({ "error": e })),
+            };
+            // Execute locally-dispatchable resources immediately under the
+            // standing grant. Remote-only scopes still need the orchestrator
+            // path via a normal approve; standing is intentionally limited to
+            // company/CF/repo reads which are local (or CF-API) here.
+            let issued = match k.issue_knock_grant(&kn).await {
+                Ok(Some(i)) => i,
+                Ok(None) => return (500, json!({ "error": "grant issuance failed" })),
+                Err(e) => return (500, json!({ "error": e })),
+            };
+            let secret = issued.handle.secret;
+            let mut outcomes = Vec::new();
+            for resource in &secret.resources {
+                for op in &secret.permissions {
+                    if let Err(e) = k
+                        .consume_capability(&secret.token, &secret.requester_id, resource, *op)
+                        .await
+                    {
+                        return (500, json!({ "error": e }));
+                    }
+                    if locally_dispatchable(resource) {
+                        let (ok, data, error) = execute_locally(&self.env, k, resource, *op).await;
+                        let outcome = Outcome {
+                            id: curatom_crypto::random_id("out"),
+                            intent_id: secret.intent_id.clone(),
+                            execution_id: curatom_crypto::random_id("job"),
+                            grant_id: secret.grant_id.clone(),
+                            resource: resource.clone(),
+                            operation: *op,
+                            ok,
+                            data,
+                            error,
+                            provider: "standing-local".into(),
+                            mock: Some(false),
+                            at: CloudflareClock.now_iso(),
+                        };
+                        let _ = k.record_outcome(outcome.clone()).await;
+                        outcomes.push(json!({
+                            "resource": outcome.resource,
+                            "ok": outcome.ok,
+                            "data": outcome.data,
+                            "error": outcome.error,
+                        }));
+                    }
+                }
+            }
+            return (
+                200,
                 json!({
                     "knock_id": kn.id,
-                    "expires_at": kn.expires_at,
-                    "message": "The operator has 88 seconds. If they approve, your access will be granted."
+                    "standing_grant_id": stg_id,
+                    "standing": true,
+                    "message": "Standing grant applied — no operator tap required. Activity logged.",
+                    "outcomes": outcomes,
                 }),
-            ),
-            Err(e) if e == "token_not_recognized" => {
-                (401, json!({ "error": e }))
-            }
-            Err(e) => (400, json!({ "error": e })),
+            );
         }
+        (
+            201,
+            json!({
+                "knock_id": kn.id,
+                "expires_at": kn.expires_at,
+                "standing": false,
+                "message": "The operator has 88 seconds. If they approve, your access will be granted."
+            }),
+        )
     }
 
     async fn h_inorganic_submit_legacy(&self, hr: &HttpRequestDto) -> Reply {
@@ -2774,7 +3045,8 @@ fn repository_view(r: &curatom_protocol::Repository) -> Value {
 }
 
 /// GitHub requires a `User-Agent` on every request or it 403s outright.
-async fn github_get(url: &str, auth_header: Option<&str>) -> std::result::Result<Value, String> {
+
+pub(crate) async fn github_get(url: &str, auth_header: Option<&str>) -> std::result::Result<Value, String> {
     let mut init = RequestInit::new();
     init.with_method(Method::Get);
     let headers = Headers::new();
@@ -2803,6 +3075,7 @@ fn locally_dispatchable(resource: &str) -> bool {
     resource == curatom_resource_registry::COMPANY_WHITEPAPER
         || resource == curatom_resource_registry::COMPANY_INVENTORY
         || resource == curatom_resource_registry::REPOSITORY_INVENTORY
+        || resource == curatom_resource_registry::CLOUDFLARE_INVENTORY
         || (resource.starts_with("repository.")
             && resource != curatom_resource_registry::REPOSITORY_INVENTORY)
         || resource.starts_with("compute.")
@@ -2813,10 +3086,17 @@ fn locally_dispatchable(resource: &str) -> bool {
 /// call records. Never called for a resource the orchestrator handles --
 /// see `locally_dispatchable`.
 async fn execute_locally(
+    env: &Env,
     k: &mut K,
     resource: &str,
     op: Permission,
 ) -> (bool, Option<Value>, Option<String>) {
+    // `cloudflare.inventory` — real CF API when CLOUDFLARE_API_TOKEN +
+    // CLOUDFLARE_ACCOUNT_ID secrets exist on the Worker; otherwise an
+    // honest credentials_not_configured result (never invents inventory).
+    if resource == curatom_resource_registry::CLOUDFLARE_INVENTORY {
+        return workspace::fetch_cloudflare_inventory(env).await;
+    }
     // `company.inventory` -- what this account actually holds. Not a
     // list of "internal assets" in the abstract (the account has no
     // such concept, and pretending it does would be a lie in the

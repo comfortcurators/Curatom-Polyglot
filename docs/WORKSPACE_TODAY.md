@@ -28,3 +28,16 @@ computer, (3) standing CF + GitHub access without constant approve taps,
 - Sensitive scopes stay on the knock path.
 - Existing approve/refuse + Turnstile path unchanged for non-standing knocks.
 - No Workers/D1 deleted.
+
+## 1 Oct 2026 — wired, deployed, autosave
+
+- The wire patches are applied in the source tree (`crates/key-kernel`,
+  `crates/substrate-cloudflare`, `workers/api`). The live kernel already ran
+  this code; the repository now matches it. `patches/` stays as the record.
+- **Autosave**: Valhalla `close` now saves the workspace as checkpoint
+  `autosave-latest` under the key's own hash before destroying the sandbox
+  (`snapshot=0` skips it; a failed save never blocks closing and is written
+  to the receipt). `provision` with no `checkpoint_id` restores
+  `autosave-latest` if it exists (`fresh=1` starts empty).
+- Valhalla Worker deployed with `--containers-rollout=none`: the container
+  image was not rebuilt (no Docker daemon in the deploying environment).
