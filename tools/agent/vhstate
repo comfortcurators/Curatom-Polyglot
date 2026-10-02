@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# vhstate            print my working state (what is in flight, where things live)
+# vhstate set FILE   replace it with FILE
+# Kept in the agent vault (Cloudflare KV) so any later session starts from it
+# instead of from an empty context.
+NS=1d9ef30a202f47a4be3fbe77f3aed06f
+KV="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces/$NS/values/CLAUDE_STATE"
+if [ "${1:-}" = set ]; then
+  curl -s -X PUT "$KV" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" --data-binary "@$2" | python3 -c 'import json,sys;print("saved" if json.load(sys.stdin)["success"] else "failed")'
+else
+  curl -s "$KV" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"; echo
+fi
