@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# vh "<command>" — run a command in my Valhalla sandbox (key read from the KV vault).
+NS=1d9ef30a202f47a4be3fbe77f3aed06f
+KV="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces/$NS/values"
+TOK=$(curl -s "$KV/CURATOM_TOKEN" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+SB=$(curl -s "$KV/VALHALLA_SANDBOX" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+CMD=$(python3 -c 'import sys,base64;print(base64.b64encode(sys.argv[1].encode()).decode())' "$1")
+curl -s -G "https://valhalla.rajvansh.dev/valhalla/$SB/exec" -H "x-curatom-token: $TOK" --data-urlencode "cmd=echo $CMD | base64 -d | bash" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("stdout",""),end="");print(d.get("stderr",""),end="",file=sys.stderr);print(d.get("error",""),file=sys.stderr) if d.get("error") else None'

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# vhpush <local git repo> <remote dir> — copy the committed tree (HEAD) into my
+# Valhalla sandbox. No credentials leave this machine: the code is streamed
+# through the sandbox's write API in chunks and unpacked there.
+set -euo pipefail
+src=$1; dst=$2
+NS=1d9ef30a202f47a4be3fbe77f3aed06f
+KV="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces/$NS/values"
+TOK=$(curl -s "$KV/CURATOM_TOKEN" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+SB=$(curl -s "$KV/VALHALLA_SANDBOX" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+B="https://valhalla.rajvansh.dev/valhalla/$SB"
+tmp=$(mktemp -d); git -C "$src" archive --format=tar.gz HEAD | base64 -w0 > "$tmp/b64"
+split -b 12000 -d -a 4 "$tmp/b64" "$tmp/p."
+n=0; for f in "$tmp"/p.*; do
+  curl -sf -G "$B/write" -H "x-curatom-token: $TOK" --data-urlencode "path=/workspace/.up/$(basename $f)" --data-urlencode "body@$f" >/dev/null
+  n=$((n+1))
+done
+vh "set -e; rm -rf '$dst'; mkdir -p '$dst'; cat /workspace/.up/p.* | base64 -d | tar -xz -C '$dst'; rm -rf /workspace/.up; echo pushed: \$(find '$dst' -type f | wc -l) files"
+echo; echo "chunks: $n"; rm -rf "$tmp"
