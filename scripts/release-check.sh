@@ -15,6 +15,7 @@ rustup target list --installed | grep -qx wasm32-unknown-unknown || {
   exit 127
 }
 
+run python3 scripts/check_agent_docs.py
 run cargo fmt --all -- --check
 run cargo test --workspace --locked
 run cargo check --manifest-path workers/api/Cargo.toml --target wasm32-unknown-unknown --locked

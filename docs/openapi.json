@@ -1,0 +1,908 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Curatom key API",
+  "version": "2026-11-15",
+  "description": "Endpoints an AI agent can use with a Curatom key. Full guide: https://curatom.rajvansh.dev/llm-guide.md . Send the key as header x-curatom-token. Flag problems honestly to the operator."
+ },
+ "servers": [
+  {
+   "url": "https://curatom.rajvansh.dev"
+  }
+ ],
+ "security": [
+  {
+   "curatomHeader": []
+  },
+  {
+   "curatomQuery": []
+  }
+ ],
+ "components": {
+  "securitySchemes": {
+   "curatomHeader": {
+    "type": "apiKey",
+    "in": "header",
+    "name": "x-curatom-token",
+    "description": "Preferred."
+   },
+   "curatomQuery": {
+    "type": "apiKey",
+    "in": "query",
+    "name": "token",
+    "description": "Legacy; ends up in logs."
+   }
+  },
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "properties": {
+     "error": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "error"
+    ]
+   },
+   "Submit": {
+    "type": "object",
+    "required": [
+     "name",
+     "reason",
+     "resources",
+     "permissions"
+    ],
+    "properties": {
+     "token": {
+      "type": "string",
+      "description": "Optional if sent in the x-curatom-token header."
+     },
+     "name": {
+      "type": "string",
+      "description": "How the operator will see you. Use a recognisable, honest name."
+     },
+     "reason": {
+      "type": "string",
+      "description": "One plain sentence."
+     },
+     "resources": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "e.g. company.whitepaper; see /inorganic/handoff"
+     },
+     "permissions": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "enum": [
+        "read",
+        "write"
+       ]
+      }
+     },
+     "duration": {
+      "type": "object",
+      "properties": {
+       "kind": {
+        "type": "string",
+        "enum": [
+         "single_use",
+         "ttl"
+        ]
+       },
+       "seconds": {
+        "type": "integer",
+        "minimum": 1
+       }
+      }
+     }
+    }
+   },
+   "Handoff": {
+    "type": "object",
+    "properties": {
+     "token": {
+      "type": "string",
+      "description": "Optional if sent in the header."
+     }
+    }
+   }
+  }
+ },
+ "paths": {
+  "/health": {
+   "get": {
+    "operationId": "health",
+    "summary": "Service health",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/llms.txt": {
+   "get": {
+    "operationId": "llmsTxt",
+    "summary": "Short index for AI agents",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "text/plain"
+     }
+    }
+   }
+  },
+  "/llm-guide": {
+   "get": {
+    "operationId": "llmGuide",
+    "summary": "Full guide, JSON-wrapped markdown",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/llm-guide.md": {
+   "get": {
+    "operationId": "llmGuideMd",
+    "summary": "Full guide as markdown",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "text/markdown"
+     }
+    }
+   }
+  },
+  "/openapi.json": {
+   "get": {
+    "operationId": "openapi",
+    "summary": "This document",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/organic/keys/verify": {
+   "get": {
+    "operationId": "verifyKey",
+    "summary": "Check that your key is valid; returns workspace_id",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/inorganic/handoff": {
+   "post": {
+    "operationId": "handoff",
+    "summary": "Get the request form and the resources your key may ask for",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Handoff"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/inorganic/submit": {
+   "post": {
+    "operationId": "requestAccess",
+    "summary": "Ask for resources. 200 = covered by a standing grant (data in outcomes); 201 = pending, operator has 88 s.",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "201": {
+      "description": "Pending request created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Submit"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/scratch/write": {
+   "get": {
+    "operationId": "notesWrite",
+    "summary": "Write a note to your private notepad (body up to 16000 bytes; encode + as %2B)",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "413": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "kind",
+      "in": "query",
+      "required": false,
+      "description": "intent, pattern or note",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "body",
+      "in": "query",
+      "required": true,
+      "description": "Note text",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "new_round",
+      "in": "query",
+      "required": false,
+      "description": "1 to start a new round",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "knock_id",
+      "in": "query",
+      "required": false,
+      "description": "Related request id",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/scratch/notes": {
+   "get": {
+    "operationId": "notesRead",
+    "summary": "Read the current notepad session",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/scratch/history": {
+   "get": {
+    "operationId": "notesHistory",
+    "summary": "List past notepad sessions",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/scratch/open": {
+   "get": {
+    "operationId": "notesOpen",
+    "summary": "Open or show the current notepad session",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/scratch/close": {
+   "get": {
+    "operationId": "notesClose",
+    "summary": "Close the session; notes are kept in the operator's ledger",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/valhalla/{sandbox_id}/status": {
+   "get": {
+    "operationId": "computerStatus",
+    "summary": "Status of your own computer (vh-<workspace_id>)",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "sandbox_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "servers": [
+     {
+      "url": "https://valhalla.rajvansh.dev"
+     }
+    ]
+   }
+  },
+  "/valhalla/{sandbox_id}/exec": {
+   "get": {
+    "operationId": "computerExec",
+    "summary": "Run a shell command on your own computer",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "sandbox_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "cmd",
+      "in": "query",
+      "required": true,
+      "description": "Command",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "servers": [
+     {
+      "url": "https://valhalla.rajvansh.dev"
+     }
+    ]
+   }
+  },
+  "/valhalla/{sandbox_id}/read": {
+   "get": {
+    "operationId": "computerRead",
+    "summary": "Read a file on your computer",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "sandbox_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "description": "Absolute path",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "servers": [
+     {
+      "url": "https://valhalla.rajvansh.dev"
+     }
+    ]
+   }
+  },
+  "/valhalla/{sandbox_id}/write": {
+   "get": {
+    "operationId": "computerWrite",
+    "summary": "Write a file on your computer",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "additionalProperties": true
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "sandbox_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "path",
+      "in": "query",
+      "required": true,
+      "description": "Absolute path",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "body",
+      "in": "query",
+      "required": false,
+      "description": "Content",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "servers": [
+     {
+      "url": "https://valhalla.rajvansh.dev"
+     }
+    ]
+   }
+  },
+  "/mcp": {
+   "post": {
+    "operationId": "mcp",
+    "summary": "Remote MCP endpoint (JSON-RPC 2.0, Streamable HTTP, JSON responses)",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "JSON-RPC response"
+     },
+     "202": {
+      "description": "Notification accepted"
+     }
+    }
+   }
+  }
+ }
+}

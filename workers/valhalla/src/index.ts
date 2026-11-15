@@ -234,9 +234,11 @@ export default {
 
     // Everything that acts on a sandbox needs the key that owns it: the
     // sandbox id alone is not a secret (it shows up in logs and receipts).
+    // That includes `status`: the label, open time and log size are the
+    // key holder's business, not anyone who can guess `vh-<workspace>`.
     // The key arrives as `token` (query) or the `x-curatom-token` header and
     // must hash to the session's recorded key_hash.
-    const acting = path.match(/^\/valhalla\/([^/]+)\/(exec|write|read|parity|snapshot|restore|close)$/);
+    const acting = path.match(/^\/valhalla\/([^/]+)\/(exec|write|read|parity|snapshot|restore|close|status)$/);
     if (acting) {
       const presented = request.headers.get("x-curatom-token") ?? params.get("token") ?? "";
       if (!presented) return jsonErr(401, "missing_token");
@@ -489,7 +491,7 @@ function corsHeaders(): Record<string, string> {
   return {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET, OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "content-type, x-curatom-token",
   };
 }
 
