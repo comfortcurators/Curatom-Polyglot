@@ -5,6 +5,8 @@ compatibility_flags = ["nodejs_compat"]
 
 [observability]
 enabled = true
+# Keys can arrive as ?token=...; keep query strings out of Workers Logs.
+redact_query_string = true
 
 # SDK Sandbox is the container. SandboxDO stays exported because v1
 # already created that sqlite class; it is not the runtime path.
