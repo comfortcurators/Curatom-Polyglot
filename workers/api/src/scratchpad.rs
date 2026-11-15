@@ -60,7 +60,7 @@ impl DurableObject for Scratchpad {
         let path = url.path().to_string();
         let params: std::collections::HashMap<String, String> = url
             .query_pairs()
-            .map(|(k, v)| (k.into_owned(), v.into_owned().replace('+', " ")))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
 
         let token = match params.get("token") {

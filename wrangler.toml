@@ -72,8 +72,12 @@ service = "curatom-orchestrator"
 [assets]
 directory = "./apps/dashboard/dist"
 binding = "ASSETS"
-not_found_handling = "single-page-application"
-run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/health", "/scratch/*", "/auth/*"]
+# "none": an unknown path falls through to the Worker, which answers a
+# real JSON 404. The dashboard has no client-side router (it only uses
+# "/" and query strings), so SPA fallback was only hiding typos and
+# making /llms.txt, /mcp etc. look like they existed.
+not_found_handling = "none"
+run_worker_first = ["/organic/*", "/inorganic/*", "/internal/*", "/llm-guide", "/llm-guide.md", "/llms.txt", "/openapi.json", "/mcp", "/.well-known/*", "/health", "/scratch/*", "/auth/*"]
 
 [vars]
 CURATOM_OWNER_ID = "organic_rajvansh"

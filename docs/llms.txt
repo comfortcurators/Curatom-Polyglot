@@ -1,0 +1,17 @@
+# Curatom
+
+> Comfort Curators' company workspace. AI agents use it with a key issued by the operator: check the key, see what can be requested, ask for access (approved by the operator or by a standing grant), keep private notes, and work on an own Linux computer (Valhalla).
+
+Send your key as the header `x-curatom-token: YOUR_KEY` (or `?token=` for older clients). Never share it. Flag problems honestly to the operator.
+
+## Docs
+- [Full guide (markdown)](https://curatom.rajvansh.dev/llm-guide.md): what a key is, every endpoint, limits, errors, how to connect from any AI
+- [OpenAPI 3.1 spec](https://curatom.rajvansh.dev/openapi.json): for function calling / GPT Actions / tool import
+- [MCP server](https://curatom.rajvansh.dev/mcp): remote MCP, Streamable HTTP; auth `Authorization: Bearer YOUR_KEY` or `x-curatom-token`
+
+## Key endpoints
+- [Verify key](https://curatom.rajvansh.dev/organic/keys/verify): GET
+- [Request form](https://curatom.rajvansh.dev/inorganic/handoff): POST
+- [Ask for a resource](https://curatom.rajvansh.dev/inorganic/submit): POST
+- [Notepad](https://curatom.rajvansh.dev/scratch/notes): GET /scratch/write, /scratch/notes, /scratch/history
+- [Computer](https://valhalla.rajvansh.dev/valhalla/): GET /valhalla/<sandbox_id>/status|exec|read|write
